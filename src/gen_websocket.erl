@@ -5,6 +5,13 @@
 -module(gen_websocket).
 -behavior(gen_fsm).
 
+-ifdef(TEST).
+-include_lib("eunit/include/eunit.hrl").
+-else.
+-define(debugFmt(_Fmt, _Args), ok).
+-define(debugMsg(_Msg), ok).
+-endif.
+
 % gen fsm states
 -export([
 	init/2, init/3,
@@ -78,9 +85,11 @@ setopts(_Socket, _Opts) ->
 
 %% gen_fsm api
 init([Controller, Url, _Opts, Timeout]) ->
+	?debugMsg("bing"),
 	Before = now(),
 	case http_uri:parse(Url, [{scheme_defaults, [{ws, 80}, {wss, 443}]}]) of
 		{ok, {WsProtocol, _Auth, Host, Port, Path, Query}} ->
+			?debugFmt("From the url ~p I got host ~p, port ~p, and path ~p", [Url, Host, Port, Path]),
 			State = #state{ owner = Controller, host = Host, port = Port,
 				path = Path ++ Query, protocol = WsProtocol},
 			After = now(),
@@ -96,28 +105,62 @@ init([Controller, Url, _Opts, Timeout]) ->
 	end.
 
 code_change(_OldVan, StateName, State, _Extra) ->
+	?debugMsg("bing"),
 	{ok, StateName, State}.
 
 handle_event(_Event, Statename, State) ->
+	?debugMsg("bing"),
 	{next_state, Statename, State}.
 
 handle_sync_event(_Event, _From, Statename, State) ->
+	?debugMsg("bing"),
 	{reply, {error, nyi}, Statename, State}.
 
-handle_info(_Info, Statename, State) ->
+handle_info({TData, Socket, Data}, recv_handshake, {#state{transport_data = TData, socket = Socket} = State, Timeout, From, Before}) ->
+	Buffered = State#state.data_buffer,
+	Buffer = <<Buffered/binary, Data/binary>>,
+	?debugMsg("bing"),
+	case re:run(Buffer, ".*\\r\\n\\r\\n") of
+		{match, _} ->
+			Key = State#state.key,
+			ExpectedBack = base64:encode(crypto:sha(<<Key/binary, "258EAFA5-E914-47DA-95CA-C5AB0DC85B11">>)),
+			RegEx = ".*[s|S]ec-[w|W]eb[s|S]ocket-[a|A]ccept: (.*)\\r\\n.*",
+			case re:run(Buffer, RegEx, [{capture, [1], binary}]) of
+				{match, [ExpectedBack]} ->
+					gen_fsm:reply(From, {ok, self()}),
+					socket_setopts(State, [{active, once}]),
+					{next_state, State#state.mode, State#state{data_buffer = Buffer}};
+				_Else ->
+					gen_fsm:reply(From, {error, key_mismatch}),
+					{stop, normal, State}
+			end;
+		_NoMatch ->
+			socket_setopts(State, [{active, once}]),
+			After = now(),
+			Timeout2 = timeleft(Timeout, Before, After),
+			{next_state, recv_handshake, {State#state{data_buffer = Buffer}, Timeout2, From}, Timeout2}
+	end;
+	
+handle_info(Info, Statename, State) ->
+	?debugFmt("random message~n"
+		"message: ~p~n"
+		"statename: ~p~n"
+		"state: ~p", [Info, Statename, State]),
 	{next_state, Statename, State}.
 
 terminate(_Why, _Statename, _State) ->
+	?debugMsg("bing"),
 	ok.
 
 %% gen fsm states
 
 init(start, From, {State, Timeout}) ->
+	?debugMsg("bing"),
 	Before = now(),
 	{Transport, MaybeSocket} = raw_socket_connect(State, Timeout),
 	case MaybeSocket of
 		{ok, Socket} ->
-			State2 = #state{socket = Socket, transport = Transport},
+			State2 = State#state{socket = Socket, transport = Transport},
 			State3 = set_socket_atoms(Transport, State2),
 			After = now(),
 			Timeleft = timeleft(Before, After, Timeout),
@@ -127,12 +170,15 @@ init(start, From, {State, Timeout}) ->
 	end.
 
 init(_Msg, State) ->
+	?debugMsg("bing"),
 	{next_state, init, State}.
 
 recv_handshake(_Msg, _From, State) ->
+	?debugMsg("bing"),
 	{reply, {error, nyi}, recv_handshake, State}.
 
 recv_handshake(timeout, {State, Timeleft, From}) ->
+	?debugMsg("bing"),
 	Before = now(),
 	#state{transport = Transport, socket = Socket, key = Key,
 		protocol = Protocol, host = Host, path = Path} = State,
@@ -146,11 +192,11 @@ recv_handshake(timeout, {State, Timeleft, From}) ->
 			"Sec-WebSocket-Protocol: \r\n"
 			"Sec-WebSocket-Version: 13\r\n"
 			"\r\n">>],
-	Transport:send(Socket, Handshake),
+	ok = Transport:send(Socket, Handshake),
 	socket_setopts(Transport, Socket, [{active, once}]),
 	After = now(),
 	Remaining = timeleft(Before, After, Timeleft),
-	Ok = {next_state, recv_handshake, {State, Remaining, From, <<>>, now()}, Remaining},
+	Ok = {next_state, recv_handshake, {State, Remaining, From, now()}, Remaining},
 	Err = fun() ->
 		gen_fsm:reply(From, {error, timeout}),
 		{stop, normal, {State, Timeleft, From}}
@@ -158,55 +204,41 @@ recv_handshake(timeout, {State, Timeleft, From}) ->
 	if_timeleft(Remaining, Ok, Err);
 
 recv_handshake(timeout, State) ->
+	?debugMsg("bing"),
 	{_WsSocket, _Timeleft, From, _Buffer} = State,
 	gen_fsm:reply(From, {error, timeout}),
-	{stop, normal, State};
-
-recv_handshake({TransportData, Socket, Data}, {#state{transport_data = TransportData, socket = Socket} = WsSocket, Timeout, From, Buffer, Before} = State) ->
-	case re:run(Buffer, ".*\\r\\n\\r\\n") of
-		{match, _} ->
-			Key = WsSocket#state.key,
-			ExpectedBack = base64:encode(crypto:sha(<<Key/binary, "258EAFA5-E914-47DA-95CA-C5AB0DC85B11">>)),
-			RegEx = ".*[s|S]ec-[w|W]eb[s|S]ocket-[a|A]ccept: (.*)\\r\\n.*",
-			case re:run(Buffer, RegEx, [{capture, [1], binary}]) of
-				{match, [ExpectedBack]} ->
-					gen_fsm:reply(From, {ok, self()}),
-					socket_setopts(State, [{active, once}]),
-					{next_state, State#state.mode, State};
-				_Else ->
-					gen_fsm:reply(From, {error, key_mismatch}),
-					{stop, normal, State}
-			end;
-		_NoMatch ->
-			socket_setopts(WsSocket#state.transport, WsSocket#state.socket, [{active, once}]),
-			After = now(),
-			Buffer2 = <<Buffer/binary, Data/binary>>,
-			Timeout2 = timeleft(Timeout, Before, After),
-			{next_state, recv_handshake, {WsSocket, Timeout2, From, Buffer2, After, Timeout2}, Timeout2}
-	end.
+	{stop, normal, State}.
 
 active(_Msg, _From, State) ->
+	?debugMsg("bing"),
 	{reply, {error, nyi}, active, State}.
 
 active(_Msg, State) ->
+	?debugMsg("bing"),
 	{next_state, active, State}.
 
 active_once(_Msg, _From, State) ->
+	?debugMsg("bing"),
 	{reply, {error, nyi}, active_once, State}.
 
 active_once(_Msg, State) ->
+	?debugMsg("bing"),
 	{next_state, active_once, State}.
 
 passive(_Msg, _From, State) ->
+	?debugMsg("bing"),
 	{reply, {error, nyi}, passive, State}.
 
 passive(_Msg, State) ->
+	?debugMsg("bing"),
 	{next_state, passive, State}.
 
 closed(_Msg, _From, State) ->
+	?debugMsg("bing"),
 	{reply, {error, nyi}, closed, State}.
 
 closed(_Msg, State) ->
+	?debugMsg("bing"),
 	{next_state, closed, State}.
 
 % internal functions
