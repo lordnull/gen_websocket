@@ -1,0 +1,22 @@
+# build artifacts
+ebin
+deps
+erl_crash.dump
+include/commit_ver.hrl
+
+# run artifacts
+*.log
+Mnesia.*
+
+# test artifacts
+.eunit
+
+# doc artifacts
+doc
+
+# editor/ide files
+*.swp
+*.swo
+
+# OS X file system
+.DS_Store
