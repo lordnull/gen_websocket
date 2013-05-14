@@ -32,6 +32,7 @@ start(Url, Port) ->
 	Dispatch = cowboy_router:compile([{'_', [
 		{Url, ?MODULE, []},
 		{<<"/">>, ?MODULE, [index]},
+		{<<"/favicon.ico">>, ?MODULE, [404]},
 		{<<"/[...]">>, ?MODULE, [put]}
 	]}]),
 	cowboy:start_http(?MODULE, 1, [{port, Port}], [{env, [{dispatch, Dispatch}]}]).
@@ -45,24 +46,35 @@ reset_msgs(WsHandler) ->
 	lists:reverse(Q).
 
 handlers() ->
-	ets:foldl(fun({P, _}, Acc) ->
+	% good time as any to clean out dead handlers
+	All = ets:foldl(fun({P, _}, Acc) ->
 		[P | Acc]
-	end, [], ?MODULE).
+	end, [], ?MODULE),
+	AliveFold = fun(P, Acc) ->
+		case is_process_alive(P) of
+			false ->
+				ets:delete(?MODULE, P),
+				Acc;
+			true ->
+				[P | Acc]
+		end
+	end,
+	lists:foldl(AliveFold, [], All).
 
 %% cowboy handler stuff
 
-init(_Proto, Req, [index]) ->
-	?debugMsg("static serving"),
-	{ok, Req, index};
-init(_Proto, Req, [put]) ->
-	?debugMsg("sending to all websockets"),
-	{ok, Req, put};
+init(_Proto, Req, [Mode]) ->
+	?debugFmt("mode: ~p", [Mode]),
+	{ok, Req, Mode};
 init(_Protocol, _Req, _Opts) ->
 	{upgrade, protocol, cowboy_websocket}.
 
 handle(Req, index) ->
 	{ok, Req1} = cowboy_req:reply(200, [{<<"content-type">>, <<"text/plain">>}], <<"a page for you sir">>, Req),
 	{ok, Req1, index};
+handle(Req, 404) ->
+	{ok, Req1} = cowboy_req:reply(404, [], <<>>, Req),
+	{ok, Req1, 404};
 handle(Req, put) ->
 	{Path, Req1} = cowboy_req:path_info(Req),
 	ets:foldl(fun({P, _Gots}, _) ->
@@ -72,25 +84,32 @@ handle(Req, put) ->
 	{ok, Req2, put}.
 
 websocket_init(_TransportName, Req, _Opt) ->
+	?debugMsg("ws init"),
 	ets:insert(?MODULE, {self(), []}),
 	{ok, Req, undefined}.
 
 websocket_handle({text, Msg}, Req, State) ->
+	?debugFmt("got text ~p", [Msg]),
 	[{Me, Msgs}] = ets:lookup(?MODULE, self()),
 	ets:insert(?MODULE, {Me, [Msg | Msgs]}),
 	{reply, {text, <<"okie: ", Msg/binary>>}, Req, State};
-websocket_handle(_Msg, Req, State) ->
+websocket_handle(Msg, Req, State) ->
+	?debugFmt("der, okay: ~p", [Msg]),
 	{ok, Req, State}.
 
 websocket_info({send, Msg}, Req, State) ->
+	?debugMsg("sending!"),
 	{reply, {text, Msg}, Req, State};
-websocket_info(_Info, Req, State) ->
+websocket_info(Info, Req, State) ->
+	?debugFmt("ws info: ~p", [Info]),
 	{ok, Req, State}.
 
-websocket_terminate(_Reason, _Req, _State) ->
+websocket_terminate(Reason, _Req, _State) ->
+	?debugFmt("ws termiant: ~p", [Reason]),
 	ok.
 
-terminate(_,_,_) ->
+terminate(Reason,_,_) ->
+	?debugFmt("other terminate: ~p", [Reason]),
 	ok.
 
 %% internal
