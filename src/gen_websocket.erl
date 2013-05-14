@@ -12,6 +12,9 @@
 -define(debugMsg(_Msg), ok).
 -endif.
 
+-define(OPCODES, [{continuation, 0}, {text, 1}, {binary, 2}, {close, 8},
+	{ping, 9}, {pong, 10} ] ).
+
 % gen fsm states
 -export([
 	init/2, init/3,
@@ -62,8 +65,11 @@ connect(Url, Opts, Timeout) ->
 			Else
 	end.
 
-send(_Socket, _Msg) ->
-	{error, nyi}.
+send(Socket, Msg) ->
+	send(Socket, Msg, text).
+
+send(Socket, Msg, Type) ->
+	gen_fsm:sync_send_all_state_event(Socket, {send, Type, Msg}).
 
 recv(Socket) ->
 	recv(Socket, infinity).
@@ -85,7 +91,7 @@ setopts(_Socket, _Opts) ->
 
 %% gen_fsm api
 init([Controller, Url, _Opts, Timeout]) ->
-	?debugMsg("bing"),
+	?debugMsg("gen_fsm init"),
 	Before = now(),
 	case http_uri:parse(Url, [{scheme_defaults, [{ws, 80}, {wss, 443}]}]) of
 		{ok, {WsProtocol, _Auth, Host, Port, Path, Query}} ->
@@ -105,21 +111,27 @@ init([Controller, Url, _Opts, Timeout]) ->
 	end.
 
 code_change(_OldVan, StateName, State, _Extra) ->
-	?debugMsg("bing"),
 	{ok, StateName, State}.
 
-handle_event(_Event, Statename, State) ->
-	?debugMsg("bing"),
+handle_event(Event, Statename, State) ->
+	?debugFmt("handling event ~p", [Event]),
 	{next_state, Statename, State}.
 
-handle_sync_event(_Event, _From, Statename, State) ->
-	?debugMsg("bing"),
+handle_sync_event({send, Type, Msg}, From, Statename, State) when Statename =:= active; Statename =:= active_once; Statename =:= passive ->
+	?debugFmt("A send event of type ~p for msg ~p", [Type, Msg]),
+	#state{transport = Trans, socket = Socket} = State,
+	Data = encode(Type, Msg),
+	Reply = Trans:send(Socket, Data),
+	{reply, Reply, Statename, State};
+
+handle_sync_event(Event, _From, Statename, State) ->
+	?debugFmt("handling sync event ~p in state ~p", [Event, Statename]),
 	{reply, {error, nyi}, Statename, State}.
 
 handle_info({TData, Socket, Data}, recv_handshake, {#state{transport_data = TData, socket = Socket} = State, Timeout, From, Before}) ->
 	Buffered = State#state.data_buffer,
 	Buffer = <<Buffered/binary, Data/binary>>,
-	?debugMsg("bing"),
+	?debugMsg("socket info in recv_handshake"),
 	case re:run(Buffer, ".*\\r\\n\\r\\n") of
 		{match, _} ->
 			Key = State#state.key,
@@ -155,7 +167,7 @@ terminate(_Why, _Statename, _State) ->
 %% gen fsm states
 
 init(start, From, {State, Timeout}) ->
-	?debugMsg("bing"),
+	?debugMsg("Start message while in init state"),
 	Before = now(),
 	{Transport, MaybeSocket} = raw_socket_connect(State, Timeout),
 	case MaybeSocket of
@@ -178,7 +190,7 @@ recv_handshake(_Msg, _From, State) ->
 	{reply, {error, nyi}, recv_handshake, State}.
 
 recv_handshake(timeout, {State, Timeleft, From}) ->
-	?debugMsg("bing"),
+	?debugMsg("timeout while in recv handshake, sending reqeust"),
 	Before = now(),
 	#state{transport = Transport, socket = Socket, key = Key,
 		protocol = Protocol, host = Host, path = Path} = State,
@@ -295,3 +307,56 @@ if_timeleft(_Time, _Ok, Err) when is_function(Err, 0) ->
 	Err();
 if_timeleft(_Time, _Ok, Err) ->
 	Err.
+
+opcode_from_name(Name) ->
+	proplists:get_value(Name, ?OPCODES).
+
+opcode_to_name(Value) ->
+	lists:keyfind(Value, 2, ?OPCODES).
+
+encode(Type, IoList) ->
+	Opcode = opcode_from_name(Type),
+	Len = payload_length(iolist_size(IoList)),
+	Payload = iolist_to_binary(IoList),
+	{Key, MaskedPayload} = mask_payload(Payload),
+	?debugFmt("do they match in size? ~p", [bit_size(MaskedPayload) == bit_size(Payload)]),
+	?debugFmt("compare original to masked:~n"
+		"    Original (~p): ~p~n"
+		"    Masked (~p): ~p", [bit_size(Payload), Payload, bit_size(MaskedPayload), MaskedPayload]),
+	Header = <<1:1, 0:3, Opcode:4, 1:1, Len/bits, Key/bits>>, 
+	<<Header/binary, MaskedPayload/binary>>.
+
+
+mask_payload(Payload) ->
+	Key = crypto:rand_bytes(4),
+	<<Mask:32>> = Key,
+	Masked = mask_payload(Mask, Payload),
+	{Key, Masked}.
+
+mask_payload(Key, Bin) ->
+	mask_payload(Key, Bin, <<>>).
+
+mask_payload(_Key, <<>>, Acc) ->
+	?debugMsg("empty binary"),
+	Acc;
+mask_payload(Key, Bits, Acc) when bit_size(Bits) < 32 ->
+	?debugFmt("Bits left: ~p", [Bits]),
+	SizeToMask = bit_size(Bits),
+	KeyMaskLeft = 32 - SizeToMask,
+	<<SubKey:SizeToMask, _:KeyMaskLeft>> = <<Key:32>>,
+	<<B:SizeToMask>> = Bits,
+	B2 = B bxor SubKey,
+	<<Acc/binary, B2:SizeToMask>>;
+mask_payload(Key, <<B:32, Rest/binary>>, Acc) ->
+	?debugFmt("Nom a bit: ~p", [B]),
+	B2 = B bxor Key,
+	Acc2 = <<Acc/binary, B2:32>>,
+	mask_payload(Key, Rest, Acc2).
+
+
+payload_length(N) when N =< 125 ->
+	<<N:7>>;
+payload_length(N) when N =< 65535 ->
+	<<126:7, N:16>>;
+payload_length(N) when N =< 16#7fffffffffffffff ->
+	<<127:7, N:64>>.

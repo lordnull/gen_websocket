@@ -26,7 +26,7 @@ communication_test_() ->
 	{setup, fun() ->
 		{ok, Cowboy} = ws_server:start_link(<<"/ws">>, 9077),
 		{ok, WS} = gen_websocket:connect("ws://localhost:9077/ws", []),
-		[Handler | _] = ws_server:handlers(),
+		[Handler] = ws_server:handlers(),
 		{Cowboy, WS, Handler}
 	end,
 	fun({Cowboy, WS, _Handler}) ->
@@ -40,6 +40,7 @@ communication_test_() ->
 			Msg = <<"send a frame test">>,
 			Got1 = gen_websocket:send(WS, Msg),
 			?assertEqual(ok, Got1),
+			timer:sleep(1000),
 			Got2 = ws_server:reset_msgs(Handler),
 			?assertEqual([Msg], Got2)
 		end}
