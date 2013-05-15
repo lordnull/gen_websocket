@@ -61,6 +61,20 @@ handlers() ->
 	end,
 	lists:foldl(AliveFold, [], All).
 
+send(Msg) when is_binary(Msg) ->
+	send({text, Msg});
+send(Msg) ->
+	ets:foldl(fun({P, _}, Acc) ->
+		send(P, Msg),
+		Acc
+	end, [], ?MODULE).
+
+send(Handler, Msg) when is_binary(Msg) ->
+	send(Handler, {text, Msg});
+send(Handler, {Type, Msg}) ->
+	Handler ! {send, Type, Msg},
+	ok.
+
 %% cowboy handler stuff
 
 init(_Proto, Req, [Mode]) ->
@@ -97,15 +111,15 @@ websocket_handle(Msg, Req, State) ->
 	?debugFmt("der, okay: ~p", [Msg]),
 	{ok, Req, State}.
 
-websocket_info({send, Msg}, Req, State) ->
+websocket_info({send, Type, Msg}, Req, State) ->
 	?debugMsg("sending!"),
-	{reply, {text, Msg}, Req, State};
+	{reply, {Type, Msg}, Req, State};
 websocket_info(Info, Req, State) ->
 	?debugFmt("ws info: ~p", [Info]),
 	{ok, Req, State}.
 
 websocket_terminate(Reason, _Req, _State) ->
-	?debugFmt("ws termiant: ~p", [Reason]),
+	?debugFmt("ws termiante: ~p", [Reason]),
 	ok.
 
 terminate(Reason,_,_) ->
