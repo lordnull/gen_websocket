@@ -94,8 +94,8 @@ communication_test_() ->
 			end},
 
 			{"passive multiple recvs", fun() ->
-				Msgs = [{text, M} || M <- [<<"sending1">>, <<"sending2">> ,<<"sending3">>]],
-				[ws_server:send(M) || M <- Msgs],
+				Msgs = [{ok, {text, M}} || M <- [<<"sending1">>, <<"sending2">> ,<<"sending3">>]],
+				[ws_server:send(M) || {ok, M} <- Msgs],
 				Got = [gen_websocket:recv(WS) || _ <- lists:seq(1,3)],
 				?assertEqual(Msgs, Got)
 			end},

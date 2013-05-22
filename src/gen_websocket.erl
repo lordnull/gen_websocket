@@ -338,7 +338,7 @@ passive({recv, Timeout}, _From, #state{frame_buffer = Frames} = State) when leng
 		true ->
 			ok
 	end,
-	{reply, {ok, Frame}, passive, State#state{frame_buffer = Frames}};
+	{reply, {ok, Frame}, passive, State#state{frame_buffer = Tail}};
 
 passive({recv, Timeout}, From, #state{passive_from = undefined} = State) ->
 	Tref = case Timeout of
