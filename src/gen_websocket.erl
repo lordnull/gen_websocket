@@ -204,8 +204,15 @@ handle_sync_event({controlling_process, _NewOwner}, _From, Statename, State) ->
 handle_sync_event({setopts, Opts}, _From, Statename, State) ->
 	case verify_opts(Opts) of
 		true ->
+			OwnerExitFolder = fun
+				({owner_exit, DoWhat}, _Acc) ->
+					DoWhat;
+				(_, Acc) ->
+					Acc
+			end,
+			OnOwnerExit = lists:foldl(OwnerExitFolder, State#state.on_owner_exit, Opts),
 			{NextState, State2} = setopts_state_transition(Opts, Statename, State),
-			{reply, ok, NextState, State2};
+			{reply, ok, NextState, State2#state{on_owner_exit = OnOwnerExit}};
 		false ->
 			{reply, {error, badarg}, Statename, State}
 	end;
