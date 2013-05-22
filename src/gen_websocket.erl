@@ -59,10 +59,37 @@
 	payload
 }).
 
+-type active_opt() :: {'active' | mode()}.
+-type connect_opt() :: active_opt().
+-type connect_opts() :: [connect_opt()].
+-type url() :: binary().
+-opaque websocket() :: pid().
+-type message_type() :: 'text' | 'binary'.
+-type frame() :: {message_type(), binary()}.
+
+-export_type([websocket/0]).
+
 %% public api
+%% @doc Same as connect/3 with an infinite timeout. @see connect/3
+-spec connect(Url :: url(), Opts :: connect_opts()) -> {'ok', websocket()}.
 connect(Url, Opts) ->
 	connect(Url, Opts, infinity).
 
+%% @doc Connect to the given websocket server. The timeout takes into
+%% account the handshake as well.
+%% Options:
+%% <dl>
+%%     <dt>active</dt><dd>true, false, or once. When true, a message
+%% is sent to the owner process when a new frame is available. When
+%% once, when a frame is available a message is sent to the owner
+%% process, then the socket is set to `{active, false}', also known as
+%% passive. When in passive mode, recv/1,2 are used to retreive
+%% frames.</dd>
+%% </dl>
+%%
+%% When in active mode, the message send is of form:
+%%     `{gen_websocket, websocket(), frame()}'
+-spec connect(Url :: url(), Opts :: connect_opts(), Timeout :: timeout()) -> {'ok', websocket()}.
 connect(Url, Opts, Timeout) ->
 	Self = self(),
 	case gen_fsm:start(?MODULE, [Self, Url, Opts, Timeout], []) of
@@ -72,33 +99,52 @@ connect(Url, Opts, Timeout) ->
 			Else
 	end.
 
+%% @doc Send a message as text. @see send/3.
+-spec send(Socket :: websocket(), Msg :: binary()) -> 'ok'.
 send(Socket, Msg) ->
 	send(Socket, Msg, text).
 
+%% @doc Send a message as the given type.
+-spec send(Socket :: websocket(), Msg :: binary(), Type :: message_type()) -> 'ok'.
 send(Socket, Msg, Type) ->
 	gen_fsm:sync_send_all_state_event(Socket, {send, Type, Msg}).
 
+%% @doc recv/2 with an infinte timeout. @see recv/2
+-spec recv(Socket :: websocket()) -> {'ok', frame()}.
 recv(Socket) ->
 	recv(Socket, infinity).
 
+%% @doc Get a single frame from the socket, giving up after the timeout.
+-spec recv(Socket :: websocket(), Timeout :: timeout()) -> {'ok', frame()} | {'error', 'timeout'}.
 recv(Socket, Timeout) ->
 	gen_fsm:sync_send_event(Socket, {recv, Timeout}).
 
+%% @doc set the controlling process to a new owner. Can only suceede if
+%% called from the current owner.
+-spec controlling_process(Socket :: websocket(), NewOwner :: pid()) -> 'ok' | {'error', 'not_owner'}.
 controlling_process(_Socket, _NewOwner) ->
 	?debugMsg("controlling_process"),
 	{error, nyi}.
 
+%% @doc Close the socket without exiting the process created on socket
+%% connect.
+-spec close(Socket :: websocket()) -> 'ok'.
 close(_Socket) ->
 	?debugMsg("close"),
 	{error, nyi}.
 
+%% @doc Close the socket and shut it down with the given reason.
+-spec shutdown(Socket :: websocket(), How :: term()) -> 'ok'.
 shutdown(_Socket, _How) ->
 	?debugMsg("shutdown"),
 	{error, nyi}.
 
+%% @doc Set the given options on the given socket.
+-spec setopts(Socket :: websocket(), Opts :: connect_opts()) -> 'ok'.
 setopts(Socket, Opts) ->
 	gen_fsm:sync_send_all_state_event(Socket, {setopts, Opts}).
 
+%% @private
 %% gen_fsm api
 init([Controller, Url, _Opts, Timeout]) ->
 	?debugMsg("gen_fsm init"),
@@ -120,13 +166,16 @@ init([Controller, Url, _Opts, Timeout]) ->
 			Else
 	end.
 
+%% @private
 code_change(_OldVan, StateName, State, _Extra) ->
 	{ok, StateName, State}.
 
+%% @private
 handle_event(Event, Statename, State) ->
 	?debugFmt("handling event ~p", [Event]),
 	{next_state, Statename, State}.
 
+%% @private
 handle_sync_event({setopts, Opts}, _From, Statename, State) ->
 	case verify_opts(Opts, Statename, State) of
 		true ->
@@ -137,6 +186,7 @@ handle_sync_event({setopts, Opts}, _From, Statename, State) ->
 			{reply, {error, badarg}, Statename, State}
 	end;
 
+%% @private
 handle_sync_event({send, Type, Msg}, From, Statename, State) when Statename =:= active; Statename =:= active_once; Statename =:= passive ->
 	?debugFmt("A send event of type ~p for msg ~p", [Type, Msg]),
 	#state{transport = Trans, socket = Socket} = State,
@@ -144,10 +194,12 @@ handle_sync_event({send, Type, Msg}, From, Statename, State) when Statename =:= 
 	Reply = Trans:send(Socket, Data),
 	{reply, Reply, Statename, State};
 
+%% @private
 handle_sync_event(Event, _From, Statename, State) ->
 	?debugFmt("handling sync event ~p in state ~p", [Event, Statename]),
 	{reply, {error, nyi}, Statename, State}.
 
+%% @private
 handle_info({TData, Socket, Data}, recv_handshake, {#state{transport_data = TData, socket = Socket} = State, Timeout, From, Before}) ->
 	Buffered = State#state.data_buffer,
 	Buffer = <<Buffered/binary, Data/binary>>,
@@ -192,12 +244,14 @@ handle_info(Info, Statename, State) ->
 		"    state: ~p", [Info, Statename, State]),
 	{next_state, Statename, State}.
 
+%% @private
 terminate(_Why, _Statename, _State) ->
 	?debugMsg("bing"),
 	ok.
 
 %% gen fsm states
 
+%% @private
 init(start, From, {State, Timeout}) ->
 	?debugMsg("Start message while in init state"),
 	Before = now(),
@@ -217,10 +271,12 @@ init(_Msg, State) ->
 	?debugMsg("bing"),
 	{next_state, init, State}.
 
+%% @private
 recv_handshake(_Msg, _From, State) ->
 	?debugMsg("recv_handshake"),
 	{reply, {error, nyi}, recv_handshake, State}.
 
+%% @private
 recv_handshake(timeout, {State, Timeleft, From}) ->
 	?debugMsg("timeout while in recv handshake, sending reqeust"),
 	Before = now(),
@@ -253,6 +309,7 @@ recv_handshake(timeout, State) ->
 	gen_fsm:reply(From, {error, timeout}),
 	{stop, normal, State}.
 
+%% @private
 active({recv, _Timeout}, _From, State) ->
 	{reply, {error, not_passive}, active, State};
 
@@ -260,6 +317,7 @@ active(_Msg, _From, State) ->
 	?debugMsg("active state"),
 	{reply, {error, nyi}, active, State}.
 
+%% @private
 active({decoded_frames, Frames, Buffer}, State) ->
 	lists:map(fun(Frame) ->
 		State#state.owner ! {?MODULE, self(), Frame}
@@ -272,9 +330,11 @@ active(_Msg, State) ->
 	?debugMsg("bing"),
 	{next_state, active, State}.
 
+%% @private
 active_once({recv, _Timeout}, _From, State) ->
 	{reply, {error, not_passive}, active_once, State}.
 
+%% @private
 active_once({decoded_frames, [], Buffer}, State) ->
 	State2 = State#state{data_buffer = Buffer},
 	socket_setopts(State, [{active, once}]),
@@ -295,6 +355,7 @@ active_once(_Msg, State) ->
 	?debugMsg("bing"),
 	{next_state, active_once, State}.
 
+%% @private
 passive({recv, Timeout}, _From, #state{frame_buffer = Frames} = State) when length(Frames) > 0 ->
 	[Frame | Tail] = Frames,
 	if
@@ -322,6 +383,7 @@ passive(Msg, From, State) ->
 	?debugFmt("bad request from ~p: ~p", [From, Msg]),
 	{reply, {error, bad_request}, passive, State}.
 
+%% @private
 passive({timeout, Tref, recv_timeout}, #state{passive_tref = Tref} = State) ->
 	gen_fsm:reply(State#state.passive_from, {error, timeout}),
 	State2 = State#state{passive_tref = undefined, passive_from = undefined},
@@ -364,10 +426,12 @@ passive(_Msg, State) ->
 	?debugMsg("bing"),
 	{next_state, passive, State}.
 
+%% @private
 closed(_Msg, _From, State) ->
 	?debugMsg("closed state"),
 	{reply, {error, nyi}, closed, State}.
 
+%% @private
 closed(_Msg, State) ->
 	?debugMsg("bing"),
 	{next_state, closed, State}.
