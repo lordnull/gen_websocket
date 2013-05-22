@@ -52,7 +52,7 @@
 	passive_from = undefined,
 	passive_tref = undefined,
 	on_owner_exit = nothing,
-	onwner_monref
+	owner_monref
 }).
 
 -record(raw_frame, {
@@ -193,7 +193,9 @@ handle_sync_event(_Event, _From, closed, State) ->
 	{reply, {error, closed}, closed, State};
 
 handle_sync_event({controlling_process, NewOwner}, {Owner, _}, Statename, #state{owner = Owner} = State) ->
-	State2 = State#state{owner = NewOwner},
+	erlang:demonitor(State#state.owner_monref, [flush]),
+	MonRef = erlang:monitor(process, NewOwner),
+	State2 = State#state{owner = NewOwner, owner_monref = MonRef},
 	{reply, ok, Statename, State2};
 
 handle_sync_event({controlling_process, _NewOwner}, _From, Statename, State) ->
@@ -231,7 +233,7 @@ handle_info({TData, Socket, Data}, recv_handshake, {#state{transport_data = TDat
 					gen_fsm:reply(From, {ok, self()}),
 					socket_setopts(State, [{active, once}]),
 					OwnerMon = erlang:monitor(process, element(1, From)),
-					{next_state, Opts#init_opts.mode, State#state{data_buffer = <<>>, on_owner_exit = Opts#init_opts.on_owner_exit, onwner_monref = OwnerMon}};
+					{next_state, Opts#init_opts.mode, State#state{data_buffer = <<>>, on_owner_exit = Opts#init_opts.on_owner_exit, owner_monref = OwnerMon}};
 				_Else ->
 					gen_fsm:reply(From, {error, key_mismatch}),
 					{stop, normal, State}
@@ -253,7 +255,7 @@ handle_info({TData, Socket, Data}, StateName, #state{transport_data = TData, soc
 			{next_state, closed, State}
 	end;
 
-handle_info({'DOWN', OwnerMon, process, Owner, Why}, StateName, #state{owner = Owner, onwner_monref = OwnerMon, on_owner_exit = OnExit} = State) ->
+handle_info({'DOWN', OwnerMon, process, Owner, Why}, StateName, #state{owner = Owner, owner_monref = OwnerMon, on_owner_exit = OnExit} = State) ->
 	case OnExit of
 		nothing ->
 			{next_state, StateName, State};
