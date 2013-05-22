@@ -16,8 +16,72 @@ connectivity_test_() ->
 		{"connection success", fun() ->
 			Got = gen_websocket:connect("ws://localhost:9076/ws", []),
 			?assertMatch({ok, _Socket}, Got),
-			gen_websocket:close(Got)
-		end}
+			gen_websocket:close(element(2, Got))
+		end},
+
+		{"close a connection while in active true", fun() ->
+			{ok, Ws} = gen_websocket:connect("ws://localhost:9076/ws", [{active, true}]),
+			Got = gen_websocket:close(Ws),
+			?assertEqual(ok, Got)
+		end},
+
+		{"close a connection while in active false", fun() ->
+			{ok, Ws} = gen_websocket:connect("ws://localhost:9076/ws", [{active, false}]),
+			Got = gen_websocket:close(Ws),
+			?assertEqual(ok, Got)
+		end},
+
+		{"close a connection while in active once", fun() ->
+			{ok, Ws} = gen_websocket:connect("ws://localhost:9076/ws", [{active, once}]),
+			Got = gen_websocket:close(Ws),
+			?assertEqual(ok, Got)
+		end},
+
+		{"closed socket tests", setup, local, fun() ->
+			{ok, Ws} = gen_websocket:connect("ws://localhost:9076/ws", []),
+			gen_websocket:close(Ws),
+			Ws
+		end,
+		fun(Ws) ->
+			catch gen_websocket:shutdown(Ws, normal)
+		end,
+		fun(Ws) -> [
+
+			{"can't recv", fun() ->
+				Got = gen_websocket:recv(Ws, 1000),
+				?assertEqual({error, closed}, Got)
+			end},
+
+			{"can't setopts", fun() ->
+				Got = gen_websocket:setopts(Ws, [{active, once}]),
+				?assertEqual({error, closed}, Got)
+			end},
+
+			{"can't send", fun() ->
+				Got = gen_websocket:send(Ws, <<"sending on a closed socket">>),
+				?assertEqual({error, closed}, Got)
+			end},
+
+			{"can't change controller", fun() ->
+				Pid = spawn(fun() ->
+					receive _ -> ok end
+				end),
+				Got = gen_websocket:controlling_process(Ws, Pid),
+				?assertEqual({error, closed}, Got),
+				Pid ! done
+			end},
+
+			{"can close", fun() ->
+				Got = gen_websocket:close(Ws),
+				?assertEqual(ok, Got)
+			end},
+
+			{"can shutdown", fun() ->
+				Got = gen_websocket:shutdown(Ws, normal),
+				?assertEqual(ok, Got)
+			end}
+
+		] end}
 
 	] end}.
 

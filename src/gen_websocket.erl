@@ -122,22 +122,19 @@ recv(Socket, Timeout) ->
 %% @doc set the controlling process to a new owner. Can only suceede if
 %% called from the current owner.
 -spec controlling_process(Socket :: websocket(), NewOwner :: pid()) -> 'ok' | {'error', 'not_owner'}.
-controlling_process(_Socket, _NewOwner) ->
-	?debugMsg("controlling_process"),
-	{error, nyi}.
+controlling_process(Socket, NewOwner) ->
+	gen_fsm:sync_send_event(Socket, {controlling_process, NewOwner}).
 
 %% @doc Close the socket without exiting the process created on socket
 %% connect.
--spec close(Socket :: websocket()) -> 'ok'.
-close(_Socket) ->
-	?debugMsg("close"),
-	{error, nyi}.
+-spec close(Socket :: websocket()) -> 'ok' | {'error', term()}.
+close(Socket) ->
+	gen_fsm:sync_send_event(Socket, close).
 
 %% @doc Close the socket and shut it down with the given reason.
 -spec shutdown(Socket :: websocket(), How :: term()) -> 'ok'.
-shutdown(_Socket, _How) ->
-	?debugMsg("shutdown"),
-	{error, nyi}.
+shutdown(Socket, How) ->
+	gen_fsm:sync_send_event(Socket, {shutdown, How}).
 
 %% @doc Set the given options on the given socket.
 -spec setopts(Socket :: websocket(), Opts :: connect_opts()) -> 'ok'.
@@ -176,6 +173,9 @@ handle_event(Event, Statename, State) ->
 	{next_state, Statename, State}.
 
 %% @private
+handle_sync_event(_Event, _From, closed, State) ->
+	{reply, {error, closed}, closed, State};
+
 handle_sync_event({setopts, Opts}, _From, Statename, State) ->
 	case verify_opts(Opts, Statename, State) of
 		true ->
@@ -265,13 +265,21 @@ init(start, From, {State, Timeout}) ->
 			Error = {stop, normal, {error, timeout}, {State3, Timeout}},
 			Ok = {next_state, recv_handshake, {State3, Timeleft, From}, 0},
 			if_timeleft(Timeout, Ok, Error)
-	end.
+	end;
+
+init(close, _From, {State, _Timeout}) ->
+	{reply, ok, closed, State}.
 
 init(_Msg, State) ->
 	?debugMsg("bing"),
 	{next_state, init, State}.
 
 %% @private
+recv_handshake(close, _From, {State, _Timeout, _OtherFrom}) ->
+	#state{transport = T, socket = S} = State,
+	T:close(S),
+	{reply, ok, closed, State};
+
 recv_handshake(_Msg, _From, State) ->
 	?debugMsg("recv_handshake"),
 	{reply, {error, nyi}, recv_handshake, State}.
@@ -313,6 +321,11 @@ recv_handshake(timeout, State) ->
 active({recv, _Timeout}, _From, State) ->
 	{reply, {error, not_passive}, active, State};
 
+active(close, _From, State) ->
+	#state{transport = T, socket = S} = State,
+	T:close(S),
+	{reply, ok, closed, State};
+
 active(_Msg, _From, State) ->
 	?debugMsg("active state"),
 	{reply, {error, nyi}, active, State}.
@@ -331,6 +344,11 @@ active(_Msg, State) ->
 	{next_state, active, State}.
 
 %% @private
+active_once(close, _From, State) ->
+	#state{transport = T, socket = S} = State,
+	T:close(S),
+	{reply, ok, closed, State};
+
 active_once({recv, _Timeout}, _From, State) ->
 	{reply, {error, not_passive}, active_once, State}.
 
@@ -378,6 +396,24 @@ passive({recv, Timeout}, From, #state{passive_from = undefined} = State) ->
 
 passive({recv, Tiemout}, _From, State) ->
 	{reply, {error, already_recv}, passive, State};
+
+passive(close, _From, State) ->
+	case State#state.passive_from of
+		undefined ->
+			ok;
+		Waiting ->
+			gen_fsm:reply(Waiting, {error, closed})
+	end,
+	case State#state.passive_tref of
+		undefined ->
+			ok;
+		Tref ->
+			gen_fsm:cancel_timer(Tref)
+	end,
+	#state{transport = T, socket = S} = State,
+	T:close(S),
+	State2 = State#state{passive_from = undefined, passive_tref = undefined},
+	{reply, ok, closed, State2};
 
 passive(Msg, From, State) ->
 	?debugFmt("bad request from ~p: ~p", [From, Msg]),
@@ -427,9 +463,15 @@ passive(_Msg, State) ->
 	{next_state, passive, State}.
 
 %% @private
+closed(close, _From, State) ->
+	{reply, ok, closed, State};
+
+closed({shutdown, Reason}, _From, State) ->
+	{stop, Reason, ok, State};
+
 closed(_Msg, _From, State) ->
 	?debugMsg("closed state"),
-	{reply, {error, nyi}, closed, State}.
+	{reply, {error, closed}, closed, State}.
 
 %% @private
 closed(_Msg, State) ->
