@@ -185,7 +185,7 @@ handle_event({shutdown, Why}, passive, #state{passive_from = From} = State) when
 handle_event({shutdown, Why}, _StateName, State) ->
 	{stop, Why, State};
 
-handle_event(Event, Statename, State) ->
+handle_event(_Event, Statename, State) ->
 	{next_state, Statename, State}.
 
 %% @private
@@ -217,14 +217,14 @@ handle_sync_event({setopts, Opts}, _From, Statename, State) ->
 			{reply, {error, badarg}, Statename, State}
 	end;
 
-handle_sync_event({send, Type, Msg}, From, Statename, State) when Statename =:= active; Statename =:= active_once; Statename =:= passive ->
+handle_sync_event({send, Type, Msg}, _From, Statename, State) when Statename =:= active; Statename =:= active_once; Statename =:= passive ->
 	#state{transport = Trans, socket = Socket} = State,
 	Data = encode(Type, Msg),
 	Reply = Trans:send(Socket, Data),
 	{reply, Reply, Statename, State};
 
-handle_sync_event(Event, _From, Statename, State) ->
-	{reply, {error, nyi}, Statename, State}.
+handle_sync_event(_Event, _From, Statename, State) ->
+	{reply, {error, bad_request}, Statename, State}.
 
 %% @private
 handle_info({TData, Socket, Data}, recv_handshake, {#state{transport_data = TData, socket = Socket} = State, Timeout, Opts, From, Before}) ->
@@ -258,7 +258,7 @@ handle_info({TData, Socket, Data}, StateName, #state{transport_data = TData, soc
 	case decode_frames(Buffer, State) of
 		{ok, Frames, NewBuffer} ->
 			?MODULE:StateName({decoded_frames, Frames, NewBuffer}, State);
-		Error ->
+		_Error ->
 			{next_state, closed, State}
 	end;
 
@@ -275,7 +275,7 @@ handle_info({'DOWN', OwnerMon, process, Owner, Why}, StateName, #state{owner = O
 			{next_state, NextState, State2}
 	end;
 
-handle_info(Info, Statename, State) ->
+handle_info(_Info, Statename, State) ->
 	{next_state, Statename, State}.
 
 %% @private
@@ -399,7 +399,7 @@ active_once(_Msg, State) ->
 	{next_state, active_once, State}.
 
 %% @private
-passive({recv, Timeout}, _From, #state{frame_buffer = Frames} = State) when length(Frames) > 0 ->
+passive({recv, _Timeout}, _From, #state{frame_buffer = Frames} = State) when length(Frames) > 0 ->
 	[Frame | Tail] = Frames,
 	if
 		length(Tail) < State#state.max_frame_buffer ->
@@ -419,7 +419,7 @@ passive({recv, Timeout}, From, #state{passive_from = undefined} = State) ->
 	State2 = State#state{passive_from = From, passive_tref = Tref},
 	{next_state, passive, State2};
 
-passive({recv, Tiemout}, _From, State) ->
+passive({recv, _Timeout}, _From, State) ->
 	{reply, {error, already_recv}, passive, State};
 
 passive(close, _From, State) ->
@@ -440,7 +440,7 @@ passive(close, _From, State) ->
 	State2 = State#state{passive_from = undefined, passive_tref = undefined},
 	{reply, ok, closed, State2};
 
-passive(Msg, From, State) ->
+passive(_Msg, _From, State) ->
 	{reply, {error, bad_request}, passive, State}.
 
 %% @private
