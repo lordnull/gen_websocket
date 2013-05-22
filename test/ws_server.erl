@@ -110,7 +110,8 @@ websocket_handle({text, Msg}, Req, State) ->
 	?debugFmt("got text ~p", [Msg]),
 	[{Me, Msgs}] = ets:lookup(?MODULE, self()),
 	ets:insert(?MODULE, {Me, [Msg | Msgs]}),
-	{reply, {text, <<"okie: ", Msg/binary>>}, Req, State};
+	{ok, Req, State};
+	%{reply, {text, <<"okie: ", Msg/binary>>}, Req, State};
 websocket_handle(Msg, Req, State) ->
 	?debugFmt("der, okay: ~p", [Msg]),
 	{ok, Req, State}.

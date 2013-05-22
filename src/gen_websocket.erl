@@ -85,12 +85,15 @@ recv(Socket, Timeout) ->
 	gen_fsm:sync_send_event(Socket, {recv, Timeout}).
 
 controlling_process(_Socket, _NewOwner) ->
+	?debugMsg("controlling_process"),
 	{error, nyi}.
 
 close(_Socket) ->
+	?debugMsg("close"),
 	{error, nyi}.
 
 shutdown(_Socket, _How) ->
+	?debugMsg("shutdown"),
 	{error, nyi}.
 
 setopts(Socket, Opts) ->
@@ -128,25 +131,10 @@ handle_sync_event({setopts, Opts}, _From, Statename, State) ->
 	case verify_opts(Opts, Statename, State) of
 		true ->
 			{NextState, State2} = setopts_state_transition(Opts, Statename, State),
+			?debugFmt("state transition from ~p to ~p; opts: ~p", [Statename, NextState, Opts]),
 			{reply, ok, NextState, State2};
 		false ->
 			{reply, {error, badarg}, Statename, State}
-	end;
-
-handle_sync_event({setopts, [{active, Active} | Tail]}, From, Statename, State) ->
-	case {Active, Statename} of
-		{true, active} ->
-			handle_sync_event({setopts, Tail}, From, Statename, State);
-		{false, passive} ->
-			handle_sync_event({setopts, Tail}, From, Statename, State);
-		{once, active_once} ->
-			handle_sync_event({setopts, Tail}, From, Statename, State);
-		{true, _Old} ->
-			handle_sync_event({setopts, Tail}, From, active, State);
-		{false, _Old} ->
-			handle_sync_event({setopts, Tail}, From, passive, State);
-		{once, _Old} ->
-			handle_sync_event({setopts, Tail}, From, active_once, State)
 	end;
 
 handle_sync_event({send, Type, Msg}, From, Statename, State) when Statename =:= active; Statename =:= active_once; Statename =:= passive ->
@@ -189,58 +177,9 @@ handle_info({TData, Socket, Data}, StateName, #state{transport_data = TData, soc
 	StateBuffer = State#state.data_buffer,
 	Buffer = <<StateBuffer/binary, Data/binary>>,
 	?debugFmt("got in me buffer: ~p", [Buffer]),
-	case {decode_frames(Buffer, State), StateName} of
-		{{ok, [], NewBuffer}, passive} ->
-			State2 = State#state{data_buffer = NewBuffer},
-			socket_setopts(State, [{active, once}]),
-			{next_state, StateName, State2};
-		{{ok, Frames, NewBuffer}, passive} when State#state.passive_from =:= undefined ->
-			NewFrameBuffer = State#state.frame_buffer ++ Frames,
-			if
-				length(NewFrameBuffer) >= State#state.max_frame_buffer ->
-					ok;
-				true ->
-					socket_setopts(State, [{active, once}])
-			end,
-			State2 = State#state{frame_buffer = NewFrameBuffer, data_buffer = NewBuffer},
-			{next_state, StateName, State2};
-		{{ok, [Frame | Frames], NewBuffer}, passive} ->
-			gen_fsm:reply(State#state.passive_from, {ok, Frame}),
-			case State#state.passive_tref of
-				undefined ->
-					ok;
-				_ ->
-					gen_fsm:cancel_timer(State#state.passive_tref)
-			end,
-			if
-				length(Frames) >= State#state.frame_buffer ->
-					ok;
-				true ->
-					socket_setopts(State, [{active, once}])
-			end,
-			State2 = State#state{frame_buffer = Frames, data_buffer = NewBuffer, passive_from = undefined, passive_tref = undefined},
-			{next_state, StateName, State2};
-		{{ok, Frames, NewBuffer}, active} ->
-			Owner = State#state.owner,
-			lists:map(fun(Frame) ->
-				Owner ! {?MODULE, self(), Frame}
-			end, Frames),
-			socket_setopts(State, [{active, once}]),
-			State2 = State#state{frame_buffer = [], data_buffer = NewBuffer},
-			{next_state, StateName, State2};
-		{{ok, [], NewBuffer}, active_once} ->
-			State2 = State#state{data_buffer = NewBuffer},
-			{next_state, StateName, State2};
-		{{ok, [Frame | FrameBuffer], NewBuffer}, active_once} ->
-			State#state.owner ! {?MODULE, self(), Frame},
-			if
-				length(FrameBuffer) >= State#state.max_frame_buffer ->
-					ok;
-				true ->
-					socket_setopts(State, [{active, once}])
-			end,
-			State2 = State#state{frame_buffer = FrameBuffer, data_buffer = NewBuffer},
-			{next_state, passive, State2};
+	case decode_frames(Buffer, State) of
+		{ok, Frames, NewBuffer} ->
+			?MODULE:StateName({decoded_frames, Frames, NewBuffer}, State);
 		Error ->
 			?debugFmt("Frame decode error: ~p", [Error]),
 			{next_state, closed, State}
@@ -279,7 +218,7 @@ init(_Msg, State) ->
 	{next_state, init, State}.
 
 recv_handshake(_Msg, _From, State) ->
-	?debugMsg("bing"),
+	?debugMsg("recv_handshake"),
 	{reply, {error, nyi}, recv_handshake, State}.
 
 recv_handshake(timeout, {State, Timeleft, From}) ->
@@ -314,17 +253,43 @@ recv_handshake(timeout, State) ->
 	gen_fsm:reply(From, {error, timeout}),
 	{stop, normal, State}.
 
+active({recv, _Timeout}, _From, State) ->
+	{reply, {error, not_passive}, active, State};
+
 active(_Msg, _From, State) ->
-	?debugMsg("bing"),
+	?debugMsg("active state"),
 	{reply, {error, nyi}, active, State}.
+
+active({decoded_frames, Frames, Buffer}, State) ->
+	lists:map(fun(Frame) ->
+		State#state.owner ! {?MODULE, self(), Frame}
+	end, Frames),
+	socket_setopts(State, [{active, once}]),
+	State2 = State#state{frame_buffer = [], data_buffer = Buffer},
+	{next_state, active, State2};
 
 active(_Msg, State) ->
 	?debugMsg("bing"),
 	{next_state, active, State}.
 
-active_once(_Msg, _From, State) ->
-	?debugMsg("bing"),
-	{reply, {error, nyi}, active_once, State}.
+active_once({recv, _Timeout}, _From, State) ->
+	{reply, {error, not_passive}, active_once, State}.
+
+active_once({decoded_frames, [], Buffer}, State) ->
+	State2 = State#state{data_buffer = Buffer},
+	socket_setopts(State, [{active, once}]),
+	{next_state, active_once, State2};
+
+active_once({decoded_frames, [Frame | Frames], Buffer}, State) ->
+	State#state.owner ! {?MODULE, self(), Frame},
+	if
+		length(Frames) >= State#state.max_frame_buffer ->
+			ok;
+		true ->
+			socket_setopts(State, [{active, once}])
+	end,
+	State2 = State#state{frame_buffer = Frames, data_buffer = Buffer},
+	{next_state, passive, State2};
 
 active_once(_Msg, State) ->
 	?debugMsg("bing"),
@@ -362,12 +327,45 @@ passive({timeout, Tref, recv_timeout}, #state{passive_tref = Tref} = State) ->
 	State2 = State#state{passive_tref = undefined, passive_from = undefined},
 	{next_state, passive, State2};
 
+passive({decoded_frames, [], Buffer}, State) ->
+	socket_setopts(State, [{active, once}]),
+	State2 = State#state{data_buffer = Buffer},
+	{next_state, passive, State2};
+
+passive({decoded_frames, Frames, Buffer}, #state{passive_from = undefined} = State) ->
+	NewFrameBuffer = State#state.frame_buffer ++ Frames,
+	if
+		length(NewFrameBuffer) >= State#state.max_frame_buffer ->
+			ok;
+		true ->
+			socket_setopts(State, [{active, once}])
+	end,
+	State2 = State#state{frame_buffer = NewFrameBuffer, data_buffer = Buffer},
+	{next_state, passive, State2};
+
+passive({decoded_frames, [Frame | Frames], Buffer}, #state{frame_buffer = []} = State) ->
+	gen_fsm:reply(State#state.passive_from, {ok, Frame}),
+	case State#state.passive_tref of
+		undefined ->
+			ok;
+		_ ->
+			gen_fsm:cancel_timer(State#state.passive_tref)
+	end,
+	if
+		length(Frames) >= State#state.max_frame_buffer ->
+			ok;
+		true ->
+			socket_setopts(State, [{active, once}])
+	end,
+	State2 = State#state{frame_buffer = Frames, data_buffer = Buffer, passive_from = undefined, passive_tref = undefined},
+	{next_state, passive, State2};
+
 passive(_Msg, State) ->
 	?debugMsg("bing"),
 	{next_state, passive, State}.
 
 closed(_Msg, _From, State) ->
-	?debugMsg("bing"),
+	?debugMsg("closed state"),
 	{reply, {error, nyi}, closed, State}.
 
 closed(_Msg, State) ->
@@ -515,18 +513,23 @@ setopts_state_transition(Opts, Statename, State) ->
 	Active = lists:foldl(GetActiveFun, Statename, Opts),
 	case Active of
 		Statename ->
+			?debugMsg("no change"),
 			{Statename, State};
 		passive ->
+			?debugMsg("going passive"),
 			{passive, State};
 		active_once when length(State#state.frame_buffer) > 0 ->
+			?debugMsg("active once with stuff in queue"),
 			[Frame | Tail] = State#state.frame_buffer,
 			Owner = State#state.owner,
 			Owner ! {?MODULE, self(), Frame},
 			State2 = State#state{frame_buffer =  Tail},
 			{passive, State2};
 		active_once ->
-			{active, State};
+			?debugMsg("active_once"),
+			{active_once, State};
 		active ->
+			?debugMsg("active"),
 			Buffer = State#state.frame_buffer,
 			Owner = State#state.owner,
 			[Owner ! {?MODULE, self(), Frame} || Frame <- Buffer],

@@ -23,10 +23,11 @@ connectivity_test_() ->
 
 
 communication_test_() ->
-	{setup, fun() ->
+	{setup, local, fun() ->
 		{ok, Cowboy} = ws_server:start_link(<<"/ws">>, 9077),
 		{ok, WS} = gen_websocket:connect("ws://localhost:9077/ws", []),
 		[Handler] = ws_server:handlers(),
+		?debugFmt("the me: ~p", [self()]),
 		{Cowboy, WS, Handler}
 	end,
 	fun({Cowboy, WS, _Handler}) ->
@@ -60,7 +61,7 @@ communication_test_() ->
 			?assertEqual(ok, Got)
 		end},
 
-		{"passive mode tests", setup, fun() ->
+		{"passive mode tests", setup, local, fun() ->
 			?debugFmt("My pid: ~p", [self()]),
 			gen_websocket:setopts(WS, [{active, false}])
 		end, fun(_) ->
@@ -114,12 +115,14 @@ communication_test_() ->
 				after 1000 ->
 					timeout
 				end,
-				?assertEqual(timeout, Got)
+				?assertEqual(timeout, Got),
+				AlsoGot = gen_websocket:recv(WS),
+				?assertEqual({ok, {text, Msg}}, AlsoGot)
 			end}
 
 		] end},
 
-		{"active once mode tests", setup, fun() ->
+		{"active once mode tests", setup, local, fun() ->
 			gen_websocket:setopts(WS, [{active, once}])
 		end,
 		fun(_) ->
@@ -133,6 +136,7 @@ communication_test_() ->
 			end},
 
 			{"gets a message", fun() ->
+				?debugFmt("the me: ~p", [self()]),
 				Msg = <<"justice league, assemble!">>,
 				ws_server:send(Msg),
 				Got = receive
@@ -144,7 +148,7 @@ communication_test_() ->
 				?assertEqual(ok, Got)
 			end},
 
-			{"now in passive mode", fun() ->
+			{"transitioned to passive mode", fun() ->
 				Got = gen_websocket:recv(WS, 1000),
 				?assertEqual({error, timeout}, Got)
 			end},
@@ -167,7 +171,7 @@ communication_test_() ->
 
 		] end},
 
-		{"active mode tests", setup, fun() ->
+		{"active mode tests", setup, local, fun() ->
 			gen_websocket:setopts(WS, [{active, true}])
 		end,
 		fun(_) ->
@@ -177,7 +181,7 @@ communication_test_() ->
 
 			{"can't do recv", fun() ->
 				Got = gen_websocket:recv(WS),
-				?assertEqual({error, not_active}, Got)
+				?assertEqual({error, not_passive}, Got)
 			end},
 
 			{"gets a bunch of messages", fun() ->
