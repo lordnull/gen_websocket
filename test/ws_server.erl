@@ -82,7 +82,6 @@ send(Handler, {Type, Msg}) ->
 %% cowboy handler stuff
 
 init(_Proto, Req, [Mode]) ->
-	?debugFmt("mode: ~p", [Mode]),
 	{ok, Req, Mode};
 init(_Protocol, _Req, _Opts) ->
 	{upgrade, protocol, cowboy_websocket}.
@@ -102,33 +101,26 @@ handle(Req, put) ->
 	{ok, Req2, put}.
 
 websocket_init(_TransportName, Req, _Opt) ->
-	?debugMsg("ws init"),
 	ets:insert(?MODULE, {self(), []}),
 	{ok, Req, undefined}.
 
 websocket_handle({text, Msg}, Req, State) ->
-	?debugFmt("got text ~p", [Msg]),
 	[{Me, Msgs}] = ets:lookup(?MODULE, self()),
 	ets:insert(?MODULE, {Me, [Msg | Msgs]}),
 	{ok, Req, State};
 	%{reply, {text, <<"okie: ", Msg/binary>>}, Req, State};
 websocket_handle(Msg, Req, State) ->
-	?debugFmt("der, okay: ~p", [Msg]),
 	{ok, Req, State}.
 
 websocket_info({send, Type, Msg}, Req, State) ->
-	?debugFmt("sending as ~p the message ~p", [Type, Msg]),
 	{reply, {Type, Msg}, Req, State};
 websocket_info(Info, Req, State) ->
-	?debugFmt("ws info: ~p", [Info]),
 	{ok, Req, State}.
 
 websocket_terminate(Reason, _Req, _State) ->
-	?debugFmt("ws termiante: ~p", [Reason]),
 	ok.
 
 terminate(Reason,_,_) ->
-	?debugFmt("other terminate: ~p", [Reason]),
 	ok.
 
 %% internal

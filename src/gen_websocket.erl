@@ -5,12 +5,12 @@
 -module(gen_websocket).
 -behavior(gen_fsm).
 
--ifdef(TEST).
--include_lib("eunit/include/eunit.hrl").
--else.
--define(debugFmt(_Fmt, _Args), ok).
--define(debugMsg(_Msg), ok).
--endif.
+%-ifdef(TEST).
+%-include_lib("eunit/include/eunit.hrl").
+%-else.
+%-define(debugFmt(_Fmt, _Args), ok).
+%-define(debugMsg(_Msg), ok).
+%-endif.
 
 -define(OPCODES, [{continuation, 0}, {text, 1}, {binary, 2}, {close, 8},
 	{ping, 9}, {pong, 10} ] ).
@@ -50,13 +50,20 @@
 	max_frame_buffer = 3,
 	mode = passive :: mode(),
 	passive_from = undefined,
-	passive_tref = undefined
+	passive_tref = undefined,
+	on_owner_exit = nothing,
+	onwner_monref
 }).
 
 -record(raw_frame, {
 	fin = 0,
 	opcode = 0,
 	payload
+}).
+
+-record(init_opts, {
+	mode = passive,
+	on_owner_exit = nothing
 }).
 
 -type active_opt() :: {'active' | mode()}.
@@ -91,12 +98,17 @@ connect(Url, Opts) ->
 %%     `{gen_websocket, websocket(), frame()}'
 -spec connect(Url :: url(), Opts :: connect_opts(), Timeout :: timeout()) -> {'ok', websocket()}.
 connect(Url, Opts, Timeout) ->
-	Self = self(),
-	case gen_fsm:start(?MODULE, [Self, Url, Opts, Timeout], []) of
-		{ok, Pid} ->
-			gen_fsm:sync_send_event(Pid, start, infinity);
-		Else ->
-			Else
+	case verify_opts(Opts) of
+		false ->
+			{error, badarg};
+		true ->
+			Self = self(),
+			case gen_fsm:start(?MODULE, [Self, Url, Opts, Timeout], []) of
+				{ok, Pid} ->
+					gen_fsm:sync_send_event(Pid, start, infinity);
+				Else ->
+					Else
+			end
 	end.
 
 %% @doc Send a message as text. @see send/3.
@@ -123,7 +135,7 @@ recv(Socket, Timeout) ->
 %% called from the current owner.
 -spec controlling_process(Socket :: websocket(), NewOwner :: pid()) -> 'ok' | {'error', 'not_owner'}.
 controlling_process(Socket, NewOwner) ->
-	gen_fsm:sync_send_event(Socket, {controlling_process, NewOwner}).
+	gen_fsm:sync_send_all_state_event(Socket, {controlling_process, NewOwner}).
 
 %% @doc Close the socket without exiting the process created on socket
 %% connect.
@@ -134,7 +146,7 @@ close(Socket) ->
 %% @doc Close the socket and shut it down with the given reason.
 -spec shutdown(Socket :: websocket(), How :: term()) -> 'ok'.
 shutdown(Socket, How) ->
-	gen_fsm:sync_send_event(Socket, {shutdown, How}).
+	gen_fsm:send_event(Socket, {shutdown, How}).
 
 %% @doc Set the given options on the given socket.
 -spec setopts(Socket :: websocket(), Opts :: connect_opts()) -> 'ok'.
@@ -143,19 +155,18 @@ setopts(Socket, Opts) ->
 
 %% @private
 %% gen_fsm api
-init([Controller, Url, _Opts, Timeout]) ->
-	?debugMsg("gen_fsm init"),
+init([Controller, Url, Opts, Timeout]) ->
+	OptsRec = build_opts(Opts),
 	Before = now(),
 	case http_uri:parse(Url, [{scheme_defaults, [{ws, 80}, {wss, 443}]}]) of
 		{ok, {WsProtocol, _Auth, Host, Port, Path, Query}} ->
-			?debugFmt("From the url ~p I got host ~p, port ~p, and path ~p", [Url, Host, Port, Path]),
 			State = #state{ owner = Controller, host = Host, port = Port,
 				path = Path ++ Query, protocol = WsProtocol},
 			After = now(),
 			TimeLeft = timeleft(Before, After, Timeout),
 			if
 				TimeLeft > 0 ->
-					{ok, init, {State, TimeLeft}};
+					{ok, init, {State, OptsRec, TimeLeft}};
 				true ->
 					{error, timeout}
 			end;
@@ -168,42 +179,48 @@ code_change(_OldVan, StateName, State, _Extra) ->
 	{ok, StateName, State}.
 
 %% @private
+handle_event({shutdown, Why}, passive, #state{passive_from = From} = State) when From =/= undefined ->
+	gen_fsm:reply(From, {error, shutdown}),
+	{stop, Why, State};
+handle_event({shutdown, Why}, _StateName, State) ->
+	{stop, Why, State};
+
 handle_event(Event, Statename, State) ->
-	?debugFmt("handling event ~p", [Event]),
 	{next_state, Statename, State}.
 
 %% @private
 handle_sync_event(_Event, _From, closed, State) ->
 	{reply, {error, closed}, closed, State};
 
+handle_sync_event({controlling_process, NewOwner}, {Owner, _}, Statename, #state{owner = Owner} = State) ->
+	State2 = State#state{owner = NewOwner},
+	{reply, ok, Statename, State2};
+
+handle_sync_event({controlling_process, _NewOwner}, _From, Statename, State) ->
+	{reply, {error, not_owner}, Statename, State};
+
 handle_sync_event({setopts, Opts}, _From, Statename, State) ->
-	case verify_opts(Opts, Statename, State) of
+	case verify_opts(Opts) of
 		true ->
 			{NextState, State2} = setopts_state_transition(Opts, Statename, State),
-			?debugFmt("state transition from ~p to ~p; opts: ~p", [Statename, NextState, Opts]),
 			{reply, ok, NextState, State2};
 		false ->
 			{reply, {error, badarg}, Statename, State}
 	end;
 
-%% @private
 handle_sync_event({send, Type, Msg}, From, Statename, State) when Statename =:= active; Statename =:= active_once; Statename =:= passive ->
-	?debugFmt("A send event of type ~p for msg ~p", [Type, Msg]),
 	#state{transport = Trans, socket = Socket} = State,
 	Data = encode(Type, Msg),
 	Reply = Trans:send(Socket, Data),
 	{reply, Reply, Statename, State};
 
-%% @private
 handle_sync_event(Event, _From, Statename, State) ->
-	?debugFmt("handling sync event ~p in state ~p", [Event, Statename]),
 	{reply, {error, nyi}, Statename, State}.
 
 %% @private
-handle_info({TData, Socket, Data}, recv_handshake, {#state{transport_data = TData, socket = Socket} = State, Timeout, From, Before}) ->
+handle_info({TData, Socket, Data}, recv_handshake, {#state{transport_data = TData, socket = Socket} = State, Timeout, Opts, From, Before}) ->
 	Buffered = State#state.data_buffer,
 	Buffer = <<Buffered/binary, Data/binary>>,
-	?debugMsg("socket info in recv_handshake"),
 	case re:run(Buffer, ".*\\r\\n\\r\\n") of
 		{match, _} ->
 			Key = State#state.key,
@@ -213,7 +230,8 @@ handle_info({TData, Socket, Data}, recv_handshake, {#state{transport_data = TDat
 				{match, [ExpectedBack]} ->
 					gen_fsm:reply(From, {ok, self()}),
 					socket_setopts(State, [{active, once}]),
-					{next_state, State#state.mode, State#state{data_buffer = <<>>}};
+					OwnerMon = erlang:monitor(process, element(1, From)),
+					{next_state, Opts#init_opts.mode, State#state{data_buffer = <<>>, on_owner_exit = Opts#init_opts.on_owner_exit, onwner_monref = OwnerMon}};
 				_Else ->
 					gen_fsm:reply(From, {error, key_mismatch}),
 					{stop, normal, State}
@@ -228,32 +246,37 @@ handle_info({TData, Socket, Data}, recv_handshake, {#state{transport_data = TDat
 handle_info({TData, Socket, Data}, StateName, #state{transport_data = TData, socket = Socket} = State) when StateName =:= passive; StateName =:= active_once; StateName =:= active ->
 	StateBuffer = State#state.data_buffer,
 	Buffer = <<StateBuffer/binary, Data/binary>>,
-	?debugFmt("got in me buffer: ~p", [Buffer]),
 	case decode_frames(Buffer, State) of
 		{ok, Frames, NewBuffer} ->
 			?MODULE:StateName({decoded_frames, Frames, NewBuffer}, State);
 		Error ->
-			?debugFmt("Frame decode error: ~p", [Error]),
 			{next_state, closed, State}
 	end;
 
+handle_info({'DOWN', OwnerMon, process, Owner, Why}, StateName, #state{owner = Owner, onwner_monref = OwnerMon, on_owner_exit = OnExit} = State) ->
+	case OnExit of
+		nothing ->
+			{next_state, StateName, State};
+		shutdown ->
+			handle_event({shutdown, Why}, StateName, State);
+		{shutdown, Reason} ->
+			handle_event({shutdown, Reason}, StateName, State);
+		close ->
+			{reply, _Reply, NextState, State2} = ?MODULE:StateName(close, from, State),
+			{next_state, NextState, State2}
+	end;
+
 handle_info(Info, Statename, State) ->
-	?debugFmt("random message~n"
-		"    message: ~p~n"
-		"    statename: ~p~n"
-		"    state: ~p", [Info, Statename, State]),
 	{next_state, Statename, State}.
 
 %% @private
 terminate(_Why, _Statename, _State) ->
-	?debugMsg("bing"),
 	ok.
 
 %% gen fsm states
 
 %% @private
-init(start, From, {State, Timeout}) ->
-	?debugMsg("Start message while in init state"),
+init(start, From, {State, Opts, Timeout}) ->
 	Before = now(),
 	{Transport, MaybeSocket} = raw_socket_connect(State, Timeout),
 	case MaybeSocket of
@@ -263,30 +286,27 @@ init(start, From, {State, Timeout}) ->
 			After = now(),
 			Timeleft = timeleft(Before, After, Timeout),
 			Error = {stop, normal, {error, timeout}, {State3, Timeout}},
-			Ok = {next_state, recv_handshake, {State3, Timeleft, From}, 0},
+			Ok = {next_state, recv_handshake, {State3, Timeleft, Opts, From}, 0},
 			if_timeleft(Timeout, Ok, Error)
 	end;
 
-init(close, _From, {State, _Timeout}) ->
+init(close, _From, {State, _Opts, _Timeout}) ->
 	{reply, ok, closed, State}.
 
 init(_Msg, State) ->
-	?debugMsg("bing"),
 	{next_state, init, State}.
 
 %% @private
-recv_handshake(close, _From, {State, _Timeout, _OtherFrom}) ->
+recv_handshake(close, _From, {State, _Timeout, _Opts, _OtherFrom}) ->
 	#state{transport = T, socket = S} = State,
 	T:close(S),
 	{reply, ok, closed, State};
 
 recv_handshake(_Msg, _From, State) ->
-	?debugMsg("recv_handshake"),
 	{reply, {error, nyi}, recv_handshake, State}.
 
 %% @private
-recv_handshake(timeout, {State, Timeleft, From}) ->
-	?debugMsg("timeout while in recv handshake, sending reqeust"),
+recv_handshake(timeout, {State, Timeleft, Opts, From}) ->
 	Before = now(),
 	#state{transport = Transport, socket = Socket, key = Key,
 		protocol = Protocol, host = Host, path = Path} = State,
@@ -304,7 +324,7 @@ recv_handshake(timeout, {State, Timeleft, From}) ->
 	socket_setopts(Transport, Socket, [{active, once}]),
 	After = now(),
 	Remaining = timeleft(Before, After, Timeleft),
-	Ok = {next_state, recv_handshake, {State, Remaining, From, now()}, Remaining},
+	Ok = {next_state, recv_handshake, {State, Remaining, Opts, From, now()}, Remaining},
 	Err = fun() ->
 		gen_fsm:reply(From, {error, timeout}),
 		{stop, normal, {State, Timeleft, From}}
@@ -312,7 +332,6 @@ recv_handshake(timeout, {State, Timeleft, From}) ->
 	if_timeleft(Remaining, Ok, Err);
 
 recv_handshake(timeout, State) ->
-	?debugMsg("bing"),
 	{_WsSocket, _Timeleft, From, _Buffer} = State,
 	gen_fsm:reply(From, {error, timeout}),
 	{stop, normal, State}.
@@ -327,7 +346,6 @@ active(close, _From, State) ->
 	{reply, ok, closed, State};
 
 active(_Msg, _From, State) ->
-	?debugMsg("active state"),
 	{reply, {error, nyi}, active, State}.
 
 %% @private
@@ -340,7 +358,6 @@ active({decoded_frames, Frames, Buffer}, State) ->
 	{next_state, active, State2};
 
 active(_Msg, State) ->
-	?debugMsg("bing"),
 	{next_state, active, State}.
 
 %% @private
@@ -370,7 +387,6 @@ active_once({decoded_frames, [Frame | Frames], Buffer}, State) ->
 	{next_state, passive, State2};
 
 active_once(_Msg, State) ->
-	?debugMsg("bing"),
 	{next_state, active_once, State}.
 
 %% @private
@@ -416,7 +432,6 @@ passive(close, _From, State) ->
 	{reply, ok, closed, State2};
 
 passive(Msg, From, State) ->
-	?debugFmt("bad request from ~p: ~p", [From, Msg]),
 	{reply, {error, bad_request}, passive, State}.
 
 %% @private
@@ -459,7 +474,6 @@ passive({decoded_frames, [Frame | Frames], Buffer}, #state{frame_buffer = []} = 
 	{next_state, passive, State2};
 
 passive(_Msg, State) ->
-	?debugMsg("bing"),
 	{next_state, passive, State}.
 
 %% @private
@@ -470,12 +484,10 @@ closed({shutdown, Reason}, _From, State) ->
 	{stop, Reason, ok, State};
 
 closed(_Msg, _From, State) ->
-	?debugMsg("closed state"),
 	{reply, {error, closed}, closed, State}.
 
 %% @private
 closed(_Msg, State) ->
-	?debugMsg("bing"),
 	{next_state, closed, State}.
 
 % internal functions
@@ -549,10 +561,6 @@ encode(Type, IoList) ->
 	Len = payload_length(iolist_size(IoList)),
 	Payload = iolist_to_binary(IoList),
 	{Key, MaskedPayload} = mask_payload(Payload),
-	?debugFmt("do they match in size? ~p", [bit_size(MaskedPayload) == bit_size(Payload)]),
-	?debugFmt("compare original to masked:~n"
-		"    Original (~p): ~p~n"
-		"    Masked (~p): ~p", [bit_size(Payload), Payload, bit_size(MaskedPayload), MaskedPayload]),
 	Header = <<1:1, 0:3, Opcode:4, 1:1, Len/bits, Key/bits>>, 
 	<<Header/binary, MaskedPayload/binary>>.
 
@@ -567,10 +575,8 @@ mask_payload(Key, Bin) ->
 	mask_payload(Key, Bin, <<>>).
 
 mask_payload(_Key, <<>>, Acc) ->
-	?debugMsg("empty binary"),
 	Acc;
 mask_payload(Key, Bits, Acc) when bit_size(Bits) < 32 ->
-	?debugFmt("Bits left: ~p", [Bits]),
 	SizeToMask = bit_size(Bits),
 	KeyMaskLeft = 32 - SizeToMask,
 	<<SubKey:SizeToMask, _:KeyMaskLeft>> = <<Key:32>>,
@@ -578,7 +584,6 @@ mask_payload(Key, Bits, Acc) when bit_size(Bits) < 32 ->
 	B2 = B bxor SubKey,
 	<<Acc/binary, B2:SizeToMask>>;
 mask_payload(Key, <<B:32, Rest/binary>>, Acc) ->
-	?debugFmt("Nom a bit: ~p", [B]),
 	B2 = B bxor Key,
 	Acc2 = <<Acc/binary, B2:32>>,
 	mask_payload(Key, Rest, Acc2).
@@ -591,19 +596,47 @@ payload_length(N) when N =< 65535 ->
 payload_length(N) when N =< 16#7fffffffffffffff ->
 	<<127:7, N:64>>.
 
-verify_opts([], _StateName, _State) ->
+build_opts(Opts) ->
+	Fun = fun
+		({active, true}, Rec) ->
+			Rec#init_opts{mode = active};
+		({active, false}, Rec) ->
+			Rec#init_opts{mode = passive};
+		({active, once}, Rec) ->
+			Rec#init_opts{mode = active_once};
+		({owner_exit, DoWhat}, Rec) ->
+			Rec#init_opts{on_owner_exit = DoWhat}
+	end,
+	lists:foldl(Fun, #init_opts{}, Opts).
+
+verify_opts([]) ->
 	true;
-verify_opts([{active, Activeness} | Tail], StateName, State) ->
+verify_opts([{owner_exit, DoWhat} | Tail]) ->
+	case DoWhat of
+		close ->
+			verify_opts(Tail);
+		shutdown ->
+			verify_opts(Tail);
+		{shutdown, _} ->
+			verify_opts(Tail);
+		nothing ->
+			verify_opts(Tail);
+		_ ->
+			false
+	end;
+verify_opts([{active, Activeness} | Tail]) ->
 	if
 		Activeness ->
-			verify_opts(Tail, StateName, State);
+			verify_opts(Tail);
 		not Activeness ->
-			verify_opts(Tail, StateName, State);
+			verify_opts(Tail);
 		Activeness =:= once ->
-			verify_opts(Tail, StateName, State);
+			verify_opts(Tail);
 		true ->
 			false
-	end.
+	end;
+verify_opts(_) ->
+	false.
 
 setopts_state_transition(Opts, Statename, State) ->
 	GetActiveFun = fun
@@ -619,23 +652,18 @@ setopts_state_transition(Opts, Statename, State) ->
 	Active = lists:foldl(GetActiveFun, Statename, Opts),
 	case Active of
 		Statename ->
-			?debugMsg("no change"),
 			{Statename, State};
 		passive ->
-			?debugMsg("going passive"),
 			{passive, State};
 		active_once when length(State#state.frame_buffer) > 0 ->
-			?debugMsg("active once with stuff in queue"),
 			[Frame | Tail] = State#state.frame_buffer,
 			Owner = State#state.owner,
 			Owner ! {?MODULE, self(), Frame},
 			State2 = State#state{frame_buffer =  Tail},
 			{passive, State2};
 		active_once ->
-			?debugMsg("active_once"),
 			{active_once, State};
 		active ->
-			?debugMsg("active"),
 			Buffer = State#state.frame_buffer,
 			Owner = State#state.owner,
 			[Owner ! {?MODULE, self(), Frame} || Frame <- Buffer],

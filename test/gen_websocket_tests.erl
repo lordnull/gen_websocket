@@ -266,3 +266,101 @@ communication_test_() ->
 		] end}
 
 	] end}.
+
+options_test_() ->
+	{setup, local, fun() ->
+		{ok, Cowboy} = ws_server:start_link(<<"/ws">>, 9078),
+		Url = "ws://localhost:9078/ws",
+		{Cowboy, Url}
+	end,
+	fun({Cowboy, _Url}) ->
+		unlink(Cowboy),
+		ws_server:stop()
+	end,
+	fun({Cowboy, Url}) -> [
+
+		{"give control away", fun() ->
+			{ok, Ws} = gen_websocket:connect(Url, [{active, once}]),
+			Self = self(),
+			Pid = spawn(fun() ->
+				receive
+					{gen_websocket, Ws, Frame} ->
+						Self ! {got_frame, Frame}
+				end
+			end),
+			Got1 = gen_websocket:controlling_process(Ws, Pid),
+			Msg = <<"control given">>,
+			ws_server:send(Msg),
+			Got2 = receive
+				{got_frame, Frame} ->
+					Frame
+			after 1000 ->
+				{error, timeout}
+			end,
+			Got3 = receive
+				{gen_websocket, Ws, {text, Msg}} ->
+					{error, got_frame}
+			after 1000 ->
+				true
+			end,
+			exit(Pid, normal),
+			gen_websocket:shutdown(Ws, normal),
+			?assertEqual(ok, Got1),
+			?assertEqual({text, Msg}, Got2),
+			?assert(Got3)
+		end},
+
+		{"close on owner exit", fun() ->
+			Self = self(),
+			spawn(fun() ->
+				{ok, Ws} = gen_websocket:connect(Url, [{owner_exit, close}]),
+				Self ! {socket, Ws}
+			end),
+			Ws = receive
+				{socket, InS} ->
+					InS
+			end,
+			Got = gen_websocket:recv(Ws, 1000),
+			?assertEqual({error, closed}, Got),
+			gen_websocket:shutdown(Ws, normal)
+		end},
+
+		{"shutdwon on owner exit", fun() ->
+			Self = self(),
+			spawn(fun() ->
+				{ok, Ws} = gen_websocket:connect(Url, [{owner_exit, shutdown}]),
+				Self ! {socket, Ws}
+			end),
+			S = receive
+				{socket, Ws} ->
+					Ws
+			end,
+			?assertExit(_, gen_websocket:recv(S, 1000)),
+			?assertExit({noproc, _}, gen_websocket:recv(S, 1000))
+		end},
+
+		{"shutdown with a reason on owner exit", fun() ->
+			Self = self(),
+			spawn(fun() ->
+				{ok, Ws} = gen_websocket:connect(Url, [{owner_exit, {shutdown, fail}}]),
+				Self ! {socket, ws}
+			end),
+			Ws = receive
+				{socket, S} -> S
+			end,
+			?assertExit({noproc, _}, gen_websocket:recv(Ws, 1000))
+		end},
+
+		{"do nothing on owner exit", fun() ->
+			Self = self(),
+			spawn(fun() ->
+				{ok, Ws} = gen_websocket:connect(Url, [{owner_exit, nothing}]),
+				Self ! {socket, Ws}
+			end),
+			Ws = receive
+				{socket, S} -> S
+			end,
+			?assertEqual({error, timeout}, gen_websocket:recv(Ws, 100))
+		end}
+
+	] end}.
