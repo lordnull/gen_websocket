@@ -61,6 +61,7 @@ communication_test_() ->
 		end},
 
 		{"passive mode tests", setup, fun() ->
+			?debugFmt("My pid: ~p", [self()]),
 			gen_websocket:setopts(WS, [{active, false}])
 		end, fun(_) ->
 			ok
@@ -68,10 +69,28 @@ communication_test_() ->
 		fun(_) -> [
 
 			{"passive receive a frame", fun() ->
+				?debugFmt("and pid report: ~p", [self()]),
 				Msg = <<"I'm a little teapot">>,
 				ws_server:send(Msg),
 				Got = gen_websocket:recv(WS),
 				?assertEqual({ok, {text, Msg}}, Got)
+			end},
+
+			{"recv while recv gets an error", fun() ->
+				spawn(fun() -> gen_websocket:recv(WS) end),
+				Self = self(),
+				spawn(fun() ->
+					Got = gen_websocket:recv(WS),
+					Self ! {ok, Got}
+				end),
+				Got = receive
+					{ok, Res} ->
+						Res
+				after 100 ->
+					timeout
+				end,
+				ws_server:send(<<"you're going down">>),
+				?assertEqual({error, already_recv}, Got)
 			end},
 
 			{"passive multiple recvs", fun() ->

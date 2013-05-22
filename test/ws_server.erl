@@ -3,7 +3,7 @@
 
 -include_lib("eunit/include/eunit.hrl").
 
--export([start/2, start_link/2, reset_msgs/1, handlers/0, stop/0]).
+-export([start/2, start_link/2, reset_msgs/1, handlers/0, stop/0, send/1, send/2]).
 -export([init/3, handle/2, websocket_init/3, websocket_handle/3,
 	websocket_info/3, websocket_terminate/3, terminate/3]).
 
@@ -19,12 +19,7 @@ start_link(Url, Port) ->
 	end.
 
 start(Url, Port) ->
-	case lists:member(?MODULE, ets:all()) of
-		true ->
-			ok;
-		false ->
-			ets:new(?MODULE, [named_table, public, set])
-	end,
+	spawn(fun ets_holder/0),
 	application:start(crypto),
 	%application:start(ranch),
 	%application:start(cowboy),
@@ -36,6 +31,15 @@ start(Url, Port) ->
 		{<<"/[...]">>, ?MODULE, [put]}
 	]}]),
 	cowboy:start_http(?MODULE, 1, [{port, Port}], [{env, [{dispatch, Dispatch}]}]).
+
+ets_holder() ->
+	case lists:member(?MODULE, ets:all()) of
+		true ->
+			ok;
+		false ->
+			ets:new(?MODULE, [named_table, public, set]),
+			receive after infinity -> ok end
+	end.
 
 stop() ->
 	cowboy:stop_listener(?MODULE).
@@ -66,7 +70,7 @@ send(Msg) when is_binary(Msg) ->
 send(Msg) ->
 	ets:foldl(fun({P, _}, Acc) ->
 		send(P, Msg),
-		Acc
+		[P | Acc]
 	end, [], ?MODULE).
 
 send(Handler, Msg) when is_binary(Msg) ->
@@ -112,7 +116,7 @@ websocket_handle(Msg, Req, State) ->
 	{ok, Req, State}.
 
 websocket_info({send, Type, Msg}, Req, State) ->
-	?debugMsg("sending!"),
+	?debugFmt("sending as ~p the message ~p", [Type, Msg]),
 	{reply, {Type, Msg}, Req, State};
 websocket_info(Info, Req, State) ->
 	?debugFmt("ws info: ~p", [Info]),
