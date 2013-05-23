@@ -3,7 +3,8 @@
 
 -include_lib("eunit/include/eunit.hrl").
 
--export([start/2, start_link/2, reset_msgs/1, handlers/0, stop/0, send/1, send/2]).
+-export([start/2, start_link/2, reset_msgs/1, handlers/0, stop/0,
+	send/1, send/2, headers/1, header/2]).
 -export([init/3, handle/2, websocket_init/3, websocket_handle/3,
 	websocket_info/3, websocket_terminate/3, terminate/3]).
 
@@ -79,6 +80,12 @@ send(Handler, {Type, Msg}) ->
 	Handler ! {send, Type, Msg},
 	ok.
 
+headers(Handler) ->
+	gen_server:call(Handler, headers).
+
+header(Handler, Header) ->
+	gen_server:call(Handler, {header, Header}).
+
 %% cowboy handler stuff
 
 init(_Proto, Req, [Mode]) ->
@@ -114,6 +121,14 @@ websocket_handle(Msg, Req, State) ->
 
 websocket_info({send, Type, Msg}, Req, State) ->
 	{reply, {Type, Msg}, Req, State};
+websocket_info({'$gen_call', From, headers}, Req, State) ->
+	{Headers, Req2} = cowboy_req:headers(Req),
+	gen_server:reply(From, {ok, Headers}),
+	{ok, Req2, State};
+websocket_info({'$gen_call', From, {header, Header}}, Req, State) ->
+	{Val, Req2} = cowboy_req:header(Header, Req),
+	gen_server:reply(From, {ok, Val}),
+	{ok, Req2, State};
 websocket_info(Info, Req, State) ->
 	{ok, Req, State}.
 

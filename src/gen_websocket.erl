@@ -63,7 +63,8 @@
 
 -record(init_opts, {
 	mode = passive,
-	on_owner_exit = nothing
+	on_owner_exit = nothing,
+	headers = []
 }).
 
 -type active_opt() :: {'active' | mode()}.
@@ -92,6 +93,19 @@ connect(Url, Opts) ->
 %% process, then the socket is set to `{active, false}', also known as
 %% passive. When in passive mode, recv/1,2 are used to retreive
 %% frames.</dd>
+%%     <dt>owner_exit</dt><dd>close, shutdown, {shutdonw, Reason}, or 
+%% nothing. If the owner process exits, the websocket will take the
+%% given action. Clsoe means the onnection to the server will close,
+%% bug requests to the gen_websocket will return an {error, closed}.
+%% shutdown will exit the gen_websocket for the same reason as the
+%% owner, while {shutdown, Reason} will use the given reason. This means
+%% requests to the gen_websocket will raise an exception. Nothing means
+%% the websocket will not change behavior. However, if the websocket is
+%% in active or active_once mode, messages will be lost. Furthermore,
+%% since only the owner can transfer control, no new owner can be
+%% established.</dd>
+%%     <td>headers</td><dd>[binary() | {binary(),binary()}]. The list
+%% will be appended to the usual headers needed for a handshake.</dd>
 %% </dl>
 %%
 %% When in active mode, the message send is of form:
@@ -319,16 +333,22 @@ recv_handshake(timeout, {State, Timeleft, Opts, From}) ->
 	Before = now(),
 	#state{transport = Transport, socket = Socket, key = Key,
 		protocol = Protocol, host = Host, path = Path} = State,
+	Host2 = if
+		is_list(Host) ->
+			list_to_binary(Host);
+		true ->
+			Host
+	end,
 	Handshake = [<<"GET ">>, Path,
-		<<" HTTP/1.1\r\n"
-			"Host: ">>, Host, <<"\r\n"
-			"Upgrade: Websocket\r\n"
-			"Connection: Upgrade\r\n"
-			"Sec-WebSocket-Key: ">>, Key, <<"\r\n"
-			"Origin: ">>, atom_to_binary(Protocol, utf8), <<"://">>, Host, <<"\r\n"
-			"Sec-WebSocket-Protocol: \r\n"
-			"Sec-WebSocket-Version: 13\r\n"
-			"\r\n">>],
+		<<" HTTP/1.1\r\n">>] ++ concat_headers([
+			{<<"Host">>, Host2},
+			{<<"Upgrade">>, <<"Websocket">>},
+			{<<"Connection">>, <<"Upgrade">>},
+			{<<"Sec-WebSocket-Key">>, Key},
+			{<<"Origin">>, <<(atom_to_binary(Protocol, utf8))/binary, "://", Host2/binary>>},
+			<<"Sec-WebSocket-Protocol: ">>,
+			{<<"Sec-WebSocket-Version">>, <<"13">>}
+		] ++ Opts#init_opts.headers) ++ ["\r\n"],
 	ok = Transport:send(Socket, Handshake),
 	socket_setopts(Transport, Socket, [{active, once}]),
 	After = now(),
@@ -614,7 +634,9 @@ build_opts(Opts) ->
 		({active, once}, Rec) ->
 			Rec#init_opts{mode = active_once};
 		({owner_exit, DoWhat}, Rec) ->
-			Rec#init_opts{on_owner_exit = DoWhat}
+			Rec#init_opts{on_owner_exit = DoWhat};
+		({headers, Headers}, Rec) ->
+			Rec#init_opts{headers = Headers}
 	end,
 	lists:foldl(Fun, #init_opts{}, Opts).
 
@@ -644,8 +666,34 @@ verify_opts([{active, Activeness} | Tail]) ->
 		true ->
 			false
 	end;
+verify_opts([{headers, Headers} | Tail]) ->
+	AllFun = fun(Elem) ->
+		case Elem of
+			B when is_binary(B) ->
+				true;
+			{B,B2} when is_binary(B), is_binary(B2) ->
+				true;
+			_ ->
+				false
+		end
+	end,
+	case lists:all(AllFun, Headers) of
+		true ->
+			verify_opts(Tail);
+		false ->
+			false
+	end;
 verify_opts(_) ->
 	false.
+
+concat_headers(Headers) ->
+	ConCatFun = fun
+		({Key, Value}) ->
+			<<Key/binary, ": ", Value/binary, "\r\n">>;
+		(Binary) ->
+			<<Binary/binary, "\r\n">>
+	end,
+	lists:map(ConCatFun, Headers).
 
 setopts_state_transition(Opts, Statename, State) ->
 	GetActiveFun = fun

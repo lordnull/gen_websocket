@@ -37,6 +37,16 @@ connectivity_test_() ->
 			?assertEqual(ok, Got)
 		end},
 
+		{"connect with custom headers", fun() ->
+			Headers = [{<<"goobers">>, <<"cool">>}, <<"pants: plaid">>],
+			{ok, Ws} = gen_websocket:connect("ws://localhost:9076/ws", [{headers, Headers}]),
+			[Handler] = ws_server:handlers(),
+			GooberHead = ws_server:header(Handler, <<"goobers">>),
+			PantsHead = ws_server:header(Handler, <<"pants">>),
+			?assertEqual({ok, <<"cool">>}, GooberHead),
+			?assertEqual({ok, <<"plaid">>}, PantsHead)
+		end},
+
 		{"closed socket tests", setup, local, fun() ->
 			{ok, Ws} = gen_websocket:connect("ws://localhost:9076/ws", []),
 			gen_websocket:close(Ws),
