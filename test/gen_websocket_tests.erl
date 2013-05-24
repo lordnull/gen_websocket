@@ -86,6 +86,11 @@ connectivity_test_() ->
 				Pid ! done
 			end},
 
+			{"can't ping", fun() ->
+				Got = gen_websocket:ping(Ws),
+				?assertEqual({error, closed}, Got)
+			end},
+
 			{"can close", fun() ->
 				Got = gen_websocket:close(Ws),
 				?assertEqual(ok, Got)
@@ -276,6 +281,58 @@ communication_test_() ->
 				end,
 				Got = lists:foldl(FoldFun, [], Msgs),
 				?assertEqual(Msgs, Got)
+			end}
+
+		] end},
+
+		{"ping pong handling tests", setup, local, fun() ->
+			ws_server:reset_msgs(Handler),
+			gen_websocket:setopts(WS, [{active, false}])
+		end,
+		fun(_) ->
+			ok
+		end,
+		fun(_) -> [
+
+			{"can do blocking ping", fun() ->
+				Res = gen_websocket:ping(WS),
+				?assertEqual(pong, Res)
+			end},
+
+			{"pings can timeout", fun() ->
+				% cowboy always replies to pings, so we suspend the process
+				% to force a timeout.
+				erlang:suspend_process(Handler, [unless_suspending]),
+				Res = gen_websocket:ping(WS, 1),
+				erlang:resume_process(Handler),
+				?assertEqual(pang, Res)
+			end},
+
+			{"auto reply to pings", fun() ->
+				gen_websocket:setopts(WS, [{ping, pong}]),
+				ws_server:send(Handler, ping, <<>>),
+				% give the cowboy server time to do stuff
+				timer:sleep(1000),
+				MaybePong = ws_server:reset_msgs(Handler),
+				?assertMatch([pong | _], MaybePong)
+			end},
+
+			{"delivery of pings", fun() ->
+				gen_websocket:setopts(WS, [{ping, deliver}]),
+				ws_server:send(Handler, ping, <<>>),
+				timer:sleep(1000),
+				Got = gen_websocket:recv(WS, 1000),
+				?assertEqual({ok, {ping, <<>>}}, Got)
+			end},
+
+			{"queued up pings replied to when switching from deliver to pong", fun() ->
+				gen_websocket:setopts(WS, [{ping, deliver}]),
+				ws_server:reset_msgs(Handler),
+				[ws_server:send(Handler, ping, <<>>) || _ <- lists:seq(1, 3)],
+				gen_websocket:setopts(WS, [{ping, pong}]),
+				timer:sleep(1000),
+				Msgs = ws_server:reset_msgs(Handler),
+				?assertEqual([pong, pong, pong], Msgs)
 			end}
 
 		] end}

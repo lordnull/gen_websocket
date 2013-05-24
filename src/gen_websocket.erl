@@ -5,12 +5,12 @@
 -module(gen_websocket).
 -behavior(gen_fsm).
 
--ifdef(TEST).
--include_lib("eunit/include/eunit.hrl").
--else.
--define(debugFmt(_Fmt, _Args), ok).
--define(debugMsg(_Msg), ok).
--endif.
+%-ifdef(TEST).
+%-include_lib("eunit/include/eunit.hrl").
+%-else.
+%-define(debugFmt(_Fmt, _Args), ok).
+%-define(debugMsg(_Msg), ok).
+%-endif.
 
 -define(OPCODES, [{continuation, 0}, {text, 1}, {binary, 2}, {close, 8},
 	{ping, 9}, {pong, 10} ] ).
@@ -29,7 +29,7 @@
 	terminate/3, code_change/4]).
 % public api
 -export([connect/2, connect/3, send/2, recv/1, recv/2,
-	controlling_process/2, close/1, shutdown/2, setopts/2]).
+	controlling_process/2, close/1, shutdown/2, setopts/2, ping/1, ping/2]).
 
 -type mode() :: 'passive' | 'once' | 'active'.
 
@@ -52,7 +52,9 @@
 	passive_from = undefined,
 	passive_tref = undefined,
 	on_owner_exit = nothing,
-	owner_monref
+	owner_monref,
+	ping_mode = pong,
+	waiting_for_ping = []
 }).
 
 -record(raw_frame, {
@@ -64,7 +66,8 @@
 -record(init_opts, {
 	mode = passive,
 	on_owner_exit = nothing,
-	headers = []
+	headers = [],
+	ping_mode = pong
 }).
 
 -type active_opt() :: {'active' | mode()}.
@@ -104,8 +107,12 @@ connect(Url, Opts) ->
 %% in active or active_once mode, messages will be lost. Furthermore,
 %% since only the owner can transfer control, no new owner can be
 %% established.</dd>
-%%     <td>headers</td><dd>[binary() | {binary(),binary()}]. The list
+%%     <dt>headers</dt><dd>[binary() | {binary(),binary()}]. The list
 %% will be appended to the usual headers needed for a handshake.</dd>
+%%     <dt>ping</dt><dd>pong | deliver. What to do if gen_websocket gets a
+%% ping message from the server. If set to `pong', gen_websocket will
+%% send a pong message back. When set to `deliver', gen_websocket will
+%% deliver the ping like any other message, never sending a pong.</dd>
 %% </dl>
 %%
 %% When in active mode, the message send is of form:
@@ -167,6 +174,17 @@ shutdown(Socket, How) ->
 setopts(Socket, Opts) ->
 	gen_fsm:sync_send_all_state_event(Socket, {setopts, Opts}).
 
+%% @doc Like ping/2 with an infinite timeout.
+-spec ping(Socket :: websocket) -> 'pong' | 'pang' | {'error', 'closed'}.
+ping(Socket) ->
+	ping(Socket, infinity).
+
+%% @doc Send a ping message to the server, blocking the calling process
+%% until either the timeout is reached or a reply is given.
+-spec ping(Socket :: websocket, Timeout :: timeout()) -> 'pong' | 'pang' | {'error', 'closed'}.
+ping(Socket, Timeout) ->
+	gen_fsm:sync_send_all_state_event(Socket, {ping, Timeout}).
+
 %% @private
 %% gen_fsm api
 init([Controller, Url, Opts, Timeout]) ->
@@ -175,7 +193,8 @@ init([Controller, Url, Opts, Timeout]) ->
 	case http_uri:parse(Url, [{scheme_defaults, [{ws, 80}, {wss, 443}]}]) of
 		{ok, {WsProtocol, _Auth, Host, Port, Path, Query}} ->
 			State = #state{ owner = Controller, host = Host, port = Port,
-				path = Path ++ Query, protocol = WsProtocol},
+				path = Path ++ Query, protocol = WsProtocol,
+				ping_mode = OptsRec#init_opts.ping_mode},
 			After = now(),
 			TimeLeft = timeleft(Before, After, Timeout),
 			if
@@ -218,18 +237,29 @@ handle_sync_event({controlling_process, _NewOwner}, _From, Statename, State) ->
 handle_sync_event({setopts, Opts}, _From, Statename, State) ->
 	case verify_opts(Opts) of
 		true ->
-			OwnerExitFolder = fun
-				({owner_exit, DoWhat}, _Acc) ->
-					DoWhat;
-				(_, Acc) ->
-					Acc
-			end,
-			OnOwnerExit = lists:foldl(OwnerExitFolder, State#state.on_owner_exit, Opts),
-			{NextState, State2} = setopts_state_transition(Opts, Statename, State),
-			{reply, ok, NextState, State2#state{on_owner_exit = OnOwnerExit}};
+			OnOwnerExit = opt_folder(owner_exit, State#state.on_owner_exit, Opts),
+			PingMode = opt_folder(ping, State#state.ping_mode, Opts),
+			Frames2 = maybe_consume_pings(PingMode, State#state.frame_buffer, State#state.transport, State#state.socket),
+			State2 = State#state{frame_buffer = Frames2, ping_mode = PingMode},
+			{NextState, State3} = setopts_state_transition(Opts, Statename, State2),
+			{reply, ok, NextState, State3#state{on_owner_exit = OnOwnerExit}};
 		false ->
 			{reply, {error, badarg}, Statename, State}
 	end;
+
+handle_sync_event({ping, Timeout}, From, Statename, State) ->
+	Tref = case Timeout of
+		infinity ->
+			undefined;
+		_ ->
+			gen_fsm:start_timer(Timeout, {ping_timeout, From})
+	end,
+	Data = encode(ping, <<>>),
+	#state{transport = T, socket = S} = State,
+	T:send(S, Data),
+	NewWaiting = State#state.waiting_for_ping ++ [{Tref, From}],
+	State2 = State#state{waiting_for_ping = NewWaiting},
+	{next_state, Statename, State2};
 
 handle_sync_event({send, Type, Msg}, _From, Statename, State) when Statename =:= active; Statename =:= active_once; Statename =:= passive ->
 	#state{transport = Trans, socket = Socket} = State,
@@ -260,7 +290,7 @@ handle_info({TData, Socket, Data}, recv_handshake, {#state{transport_data = TDat
 					{error, mangled_header}
 			end,
 			KeyTest = fun(Header) ->
-				case re:run(Buffer, RegEx, [{capture, [1], binary}]) of
+				case re:run(Header, RegEx, [{capture, [1], binary}]) of
 					{match, [ExpectedBack]} ->
 						ok;
 					_ ->
@@ -289,7 +319,9 @@ handle_info({TData, Socket, Data}, StateName, #state{transport_data = TData, soc
 	Buffer = <<StateBuffer/binary, Data/binary>>,
 	case decode_frames(Buffer, State) of
 		{ok, Frames, NewBuffer} ->
-			?MODULE:StateName({decoded_frames, Frames, NewBuffer}, State);
+			{Frames2, State2} = consume_pongs(Frames, State),
+			Frames3 = maybe_consume_pings(State#state.ping_mode, Frames2, State#state.transport, State#state.socket),
+			?MODULE:StateName({decoded_frames, Frames3, NewBuffer}, State2);
 		_Error ->
 			{next_state, closed, State}
 	end;
@@ -307,7 +339,7 @@ handle_info({'DOWN', OwnerMon, process, Owner, Why}, StateName, #state{owner = O
 			{next_state, NextState, State2}
 	end;
 
-handle_info(_Info, Statename, State) ->
+handle_info(Info, Statename, State) ->
 	{next_state, Statename, State}.
 
 %% @private
@@ -404,6 +436,10 @@ active({decoded_frames, Frames, Buffer}, State) ->
 	State2 = State#state{frame_buffer = [], data_buffer = Buffer},
 	{next_state, active, State2};
 
+active({timeout, Tref, {ping_timeout, From}}, State) ->
+	State2 = ping_timeout(Tref, From, State),
+	{next_state, active, State2};
+
 active(_Msg, State) ->
 	{next_state, active, State}.
 
@@ -420,6 +456,10 @@ active_once({recv, _Timeout}, _From, State) ->
 active_once({decoded_frames, [], Buffer}, State) ->
 	State2 = State#state{data_buffer = Buffer},
 	socket_setopts(State, [{active, once}]),
+	{next_state, active_once, State2};
+
+active_once({timeout, Tref, {ping_timeout, From}}, State) ->
+	State2 = ping_timeout(Tref, From, State),
 	{next_state, active_once, State2};
 
 active_once({decoded_frames, [Frame | Frames], Buffer}, State) ->
@@ -518,6 +558,10 @@ passive({decoded_frames, [Frame | Frames], Buffer}, #state{frame_buffer = []} = 
 			socket_setopts(State, [{active, once}])
 	end,
 	State2 = State#state{frame_buffer = Frames, data_buffer = Buffer, passive_from = undefined, passive_tref = undefined},
+	{next_state, passive, State2};
+
+passive({timeout, Tref, {ping_timeout, From}}, State) ->
+	State2 = ping_timeout(Tref, From, State),
 	{next_state, passive, State2};
 
 passive(_Msg, State) ->
@@ -654,37 +698,40 @@ build_opts(Opts) ->
 		({owner_exit, DoWhat}, Rec) ->
 			Rec#init_opts{on_owner_exit = DoWhat};
 		({headers, Headers}, Rec) ->
-			Rec#init_opts{headers = Headers}
+			Rec#init_opts{headers = Headers};
+		({ping, Mode}, Rec) ->
+			Rec#init_opts{ping_mode = Mode}
 	end,
 	lists:foldl(Fun, #init_opts{}, Opts).
 
-verify_opts([]) ->
-	true;
-verify_opts([{owner_exit, DoWhat} | Tail]) ->
+verify_opts(Opts) ->
+	lists:all(fun valid_opt/1, Opts).
+
+valid_opt({owner_exit, DoWhat}) ->
 	case DoWhat of
 		close ->
-			verify_opts(Tail);
+			true;
 		shutdown ->
-			verify_opts(Tail);
+			true;
 		{shutdown, _} ->
-			verify_opts(Tail);
+			true;
 		nothing ->
-			verify_opts(Tail);
+			true;
 		_ ->
-			false
+			true
 	end;
-verify_opts([{active, Activeness} | Tail]) ->
+valid_opt({active, Activeness}) ->
 	if
 		Activeness ->
-			verify_opts(Tail);
+			true;
 		not Activeness ->
-			verify_opts(Tail);
+			true;
 		Activeness =:= once ->
-			verify_opts(Tail);
+			true;
 		true ->
 			false
 	end;
-verify_opts([{headers, Headers} | Tail]) ->
+valid_opt({headers, Headers}) ->
 	AllFun = fun(Elem) ->
 		case Elem of
 			B when is_binary(B) ->
@@ -695,13 +742,17 @@ verify_opts([{headers, Headers} | Tail]) ->
 				false
 		end
 	end,
-	case lists:all(AllFun, Headers) of
-		true ->
-			verify_opts(Tail);
-		false ->
+	lists:all(AllFun, Headers);
+valid_opt({ping, Opt}) ->
+	case Opt of
+		pong ->
+			true;
+		deliver ->
+			true;
+		_ ->
 			false
 	end;
-verify_opts(_) ->
+valid_opt(_) ->
 	false.
 
 concat_headers(Headers) ->
@@ -798,3 +849,68 @@ bind(ok, Arg, [Fun | Funs]) ->
 	bind(Fun(Arg), Arg, Funs);
 bind(Else, _Arg, _Funs) ->
 	Else.
+
+consume_pongs(Frames, #state{waiting_for_ping = Waits} = State) ->
+	{Pongs, Frames2} = lists:partition(fun(Frame) ->
+		case Frame of
+			{pong, _} ->
+				true;
+			_ ->
+				false
+		end
+	end, Frames),
+	NewWait = consume_pongs(Pongs, Waits),
+	{Frames2, State#state{waiting_for_ping = NewWait}};
+
+consume_pongs([], Wait) ->
+	Wait;
+consume_pongs(_, []) ->
+	[];
+consume_pongs([_ | Tail], [{Tref, From} | Wait]) ->
+	case Tref of
+		undefined ->
+			ok;
+		_ ->
+			gen_fsm:cancel_timer(Tref)
+	end,
+	gen_fsm:reply(From, pong),
+	consume_pongs(Tail, Wait).
+
+ping_timeout(Tref, From, State) ->
+	Waits = State#state.waiting_for_ping,
+	case lists:keytake(Tref, 1, Waits) of
+		false ->
+			State;
+		{value, {Tref, From}, NewWaits} ->
+			gen_fsm:reply(From, pang),
+			State2 = State#state{waiting_for_ping = NewWaits},
+			State2
+	end.
+
+opt_folder(OptName, Default, Opts) ->
+	FoldFun = fun({Key, Val}, Acc) ->
+		case Key of
+			OptName ->
+				Val;
+			_ ->
+				Acc
+		end
+	end,
+	lists:foldl(FoldFun, Default, Opts).
+
+maybe_consume_pings(deliver, Frames, _Transport, _Socket) ->
+	Frames;
+maybe_consume_pings(pong, Frames, Transport, Socket) ->
+	{Pings, Frames2} = lists:partition(fun(Frame) ->
+		case Frame of
+			{ping, _} ->
+				true;
+			_ ->
+				false
+		end
+	end, Frames),
+	lists:map(fun(_) ->
+		Data = encode(pong, <<>>),
+		Transport:send(Socket, Data)
+	end, Pings),
+	Frames2.

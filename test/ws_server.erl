@@ -4,7 +4,7 @@
 -include_lib("eunit/include/eunit.hrl").
 
 -export([start/2, start_link/2, reset_msgs/1, handlers/0, stop/0,
-	send/1, send/2, headers/1, header/2]).
+	send/1, send/2, send/3, headers/1, header/2]).
 -export([init/3, handle/2, websocket_init/3, websocket_handle/3,
 	websocket_info/3, websocket_terminate/3, terminate/3]).
 
@@ -48,6 +48,7 @@ stop() ->
 reset_msgs(WsHandler) ->
 	[{_WsHandler, Q}] = ets:lookup(?MODULE, WsHandler),
 	ets:insert(?MODULE, {WsHandler, []}),
+	?debugFmt("resetting message q of ~p. It had: ~p", [WsHandler, Q]),
 	lists:reverse(Q).
 
 handlers() ->
@@ -80,6 +81,9 @@ send(Handler, {Type, Msg}) ->
 	Handler ! {send, Type, Msg},
 	ok.
 
+send(Handler, Type, Msg) ->
+	send(Handler, {Type, Msg}).
+
 headers(Handler) ->
 	gen_server:call(Handler, headers).
 
@@ -102,21 +106,28 @@ handle(Req, 404) ->
 handle(Req, put) ->
 	{Path, Req1} = cowboy_req:path_info(Req),
 	ets:foldl(fun({P, _Gots}, _) ->
-		P ! {send, Path}
+		send(P, Path)
 	end, undefined, ?MODULE),
 	{ok, Req2} = cowboy_req:reply(204, [], <<>>),
 	{ok, Req2, put}.
 
 websocket_init(_TransportName, Req, _Opt) ->
 	ets:insert(?MODULE, {self(), []}),
-	{ok, Req, undefined}.
+	{ok, Req, pong}.
 
+websocket_handle({pong, _Msg}, Req, State) ->
+	[{Me, Msgs}] = ets:lookup(?MODULE, self()),
+	?debugMsg("got a pong"),
+	ets:insert(?MODULE, {Me, [pong | Msgs]}),
+	{ok, Req, State};
 websocket_handle({text, Msg}, Req, State) ->
+	?debugMsg("got a somethign text"),
 	[{Me, Msgs}] = ets:lookup(?MODULE, self()),
 	ets:insert(?MODULE, {Me, [Msg | Msgs]}),
 	{ok, Req, State};
 	%{reply, {text, <<"okie: ", Msg/binary>>}, Req, State};
 websocket_handle(Msg, Req, State) ->
+	?debugFmt("discarding ~p", [Msg]),
 	{ok, Req, State}.
 
 websocket_info({send, Type, Msg}, Req, State) ->
@@ -130,6 +141,7 @@ websocket_info({'$gen_call', From, {header, Header}}, Req, State) ->
 	gen_server:reply(From, {ok, Val}),
 	{ok, Req2, State};
 websocket_info(Info, Req, State) ->
+	?debugFmt("no idea what to do with ~p", [Info]),
 	{ok, Req, State}.
 
 websocket_terminate(Reason, _Req, _State) ->
