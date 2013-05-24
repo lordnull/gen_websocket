@@ -13,6 +13,8 @@ deps:
 clean: testclean
 	./rebar clean
 
+doc: deps compile
+	./rebar doc skip_deps=true
 
 TEST_LOG_FILE := eunit.log
 testclean:
