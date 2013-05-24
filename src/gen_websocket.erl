@@ -28,7 +28,7 @@
 -export([init/1, handle_event/3, handle_sync_event/4, handle_info/3, 
 	terminate/3, code_change/4]).
 % public api
--export([connect/2, connect/3, send/2, recv/1, recv/2,
+-export([connect/2, connect/3, send/2, send/3, recv/1, recv/2,
 	controlling_process/2, close/1, shutdown/2, setopts/2, ping/1, ping/2]).
 
 -type mode() :: 'passive' | 'once' | 'active'.
@@ -96,10 +96,10 @@ connect(Url, Opts) ->
 %% process, then the socket is set to `{active, false}', also known as
 %% passive. When in passive mode, recv/1,2 are used to retreive
 %% frames.</dd>
-%%     <dt>owner_exit</dt><dd>close, shutdown, {shutdonw, Reason}, or 
+%%     <dt>owner_exit</dt><dd>close, shutdown, {shutdown, Reason}, or 
 %% nothing. If the owner process exits, the websocket will take the
-%% given action. Clsoe means the onnection to the server will close,
-%% bug requests to the gen_websocket will return an {error, closed}.
+%% given action. Close means the onnection to the server will close,
+%% but requests to the gen_websocket will return an {error, closed}.
 %% shutdown will exit the gen_websocket for the same reason as the
 %% owner, while {shutdown, Reason} will use the given reason. This means
 %% requests to the gen_websocket will raise an exception. Nothing means
@@ -152,7 +152,7 @@ recv(Socket) ->
 recv(Socket, Timeout) ->
 	gen_fsm:sync_send_event(Socket, {recv, Timeout}).
 
-%% @doc set the controlling process to a new owner. Can only suceede if
+%% @doc set the controlling process to a new owner. Can only succede if
 %% called from the current owner.
 -spec controlling_process(Socket :: websocket(), NewOwner :: pid()) -> 'ok' | {'error', 'not_owner'}.
 controlling_process(Socket, NewOwner) ->
@@ -175,18 +175,18 @@ setopts(Socket, Opts) ->
 	gen_fsm:sync_send_all_state_event(Socket, {setopts, Opts}).
 
 %% @doc Like ping/2 with an infinite timeout.
--spec ping(Socket :: websocket) -> 'pong' | 'pang' | {'error', 'closed'}.
+-spec ping(Socket :: websocket()) -> 'pong' | 'pang' | {'error', 'closed'}.
 ping(Socket) ->
 	ping(Socket, infinity).
 
 %% @doc Send a ping message to the server, blocking the calling process
 %% until either the timeout is reached or a reply is given.
--spec ping(Socket :: websocket, Timeout :: timeout()) -> 'pong' | 'pang' | {'error', 'closed'}.
+-spec ping(Socket :: websocket(), Timeout :: timeout()) -> 'pong' | 'pang' | {'error', 'closed'}.
 ping(Socket, Timeout) ->
 	gen_fsm:sync_send_all_state_event(Socket, {ping, Timeout}).
 
-%% @private
 %% gen_fsm api
+%% @private
 init([Controller, Url, Opts, Timeout]) ->
 	OptsRec = build_opts(Opts),
 	Before = now(),
@@ -366,6 +366,7 @@ init(start, From, {State, Opts, Timeout}) ->
 init(close, _From, {State, _Opts, _Timeout}) ->
 	{reply, ok, closed, State}.
 
+%% @private
 init(_Msg, State) ->
 	{next_state, init, State}.
 
