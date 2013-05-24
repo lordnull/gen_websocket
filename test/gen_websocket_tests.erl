@@ -13,6 +13,11 @@ connectivity_test_() ->
 	end,
 	fun(Cowboy) -> [
 
+		{"connect to non-existant endpoing", fun() ->
+			Got = gen_websocket:connect("ws://localhost:9076/favicon.ico", []),
+			?assertEqual({error, {404, <<"Not Found">>}}, Got)
+		end},
+
 		{"connection success", fun() ->
 			Got = gen_websocket:connect("ws://localhost:9076/ws", []),
 			?assertMatch({ok, _Socket}, Got),

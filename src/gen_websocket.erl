@@ -5,12 +5,12 @@
 -module(gen_websocket).
 -behavior(gen_fsm).
 
-%-ifdef(TEST).
-%-include_lib("eunit/include/eunit.hrl").
-%-else.
-%-define(debugFmt(_Fmt, _Args), ok).
-%-define(debugMsg(_Msg), ok).
-%-endif.
+-ifdef(TEST).
+-include_lib("eunit/include/eunit.hrl").
+-else.
+-define(debugFmt(_Fmt, _Args), ok).
+-define(debugMsg(_Msg), ok).
+-endif.
 
 -define(OPCODES, [{continuation, 0}, {text, 1}, {binary, 2}, {close, 8},
 	{ping, 9}, {pong, 10} ] ).
@@ -249,14 +249,32 @@ handle_info({TData, Socket, Data}, recv_handshake, {#state{transport_data = TDat
 			Key = State#state.key,
 			ExpectedBack = base64:encode(crypto:sha(<<Key/binary, "258EAFA5-E914-47DA-95CA-C5AB0DC85B11">>)),
 			RegEx = ".*[s|S]ec-[w|W]eb[s|S]ocket-[a|A]ccept: (.*)\\r\\n.*",
-			case re:run(Buffer, RegEx, [{capture, [1], binary}]) of
-				{match, [ExpectedBack]} ->
+			StatusTest = fun
+				(<<"HTTP/1.1 101 Switching Protocols", _/binary>>) ->
+					ok;
+				(<<"HTTP/1.1 ", Status:3/binary, " ", Rest/binary>>) ->
+					StatusInt = list_to_integer(binary_to_list(Status)),
+					[StatusMsg|_] = binary:split(Rest, <<"\r\n">>),
+					{error, {StatusInt, StatusMsg}};
+				(_) ->
+					{error, mangled_header}
+			end,
+			KeyTest = fun(Header) ->
+				case re:run(Buffer, RegEx, [{capture, [1], binary}]) of
+					{match, [ExpectedBack]} ->
+						ok;
+					_ ->
+						{error, key_mismatch}
+				end
+			end,
+			case bind(Buffer, [StatusTest, KeyTest]) of
+				ok ->
 					gen_fsm:reply(From, {ok, self()}),
 					socket_setopts(State, [{active, once}]),
 					OwnerMon = erlang:monitor(process, element(1, From)),
 					{next_state, Opts#init_opts.mode, State#state{data_buffer = <<>>, on_owner_exit = Opts#init_opts.on_owner_exit, owner_monref = OwnerMon}};
-				_Else ->
-					gen_fsm:reply(From, {error, key_mismatch}),
+				Else ->
+					gen_fsm:reply(From, Else),
 					{stop, normal, State}
 			end;
 		_NoMatch ->
@@ -770,3 +788,13 @@ collapse_continuations([#raw_frame{opcode = Op, payload = Bin} | Tail], _Type, _
 	Opname = opcode_to_name(Op),
 	Acc2 = [{Opname, Bin} | Acc],
 	collapse_continuations(Tail, undefined, <<>>, Acc2).
+
+bind(Arg, [Fun | Funs]) ->
+	bind(Fun(Arg), Arg, Funs).
+
+bind(ok, _Arg, []) ->
+	ok;
+bind(ok, Arg, [Fun | Funs]) ->
+	bind(Fun(Arg), Arg, Funs);
+bind(Else, _Arg, _Funs) ->
+	Else.
