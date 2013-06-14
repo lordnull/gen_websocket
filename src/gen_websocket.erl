@@ -360,7 +360,9 @@ init(start, From, {State, Opts, Timeout}) ->
 			Timeleft = timeleft(Before, After, Timeout),
 			Error = {stop, normal, {error, timeout}, {State3, Timeout}},
 			Ok = {next_state, recv_handshake, {State3, Timeleft, Opts, From}, 0},
-			if_timeleft(Timeout, Ok, Error)
+			if_timeleft(Timeout, Ok, Error);
+		Else ->
+			{stop, normal, Else, {State, Opts, Timeout}}
 	end;
 
 init(close, _From, {State, _Opts, _Timeout}) ->
