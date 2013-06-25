@@ -1,5 +1,6 @@
 -module(property_tests).
 
+-ifdef(PROPER).
 -include_lib("proper/include/proper.hrl").
 -include_lib("eunit/include/eunit.hrl").
 
@@ -127,3 +128,5 @@ recv(#conn{socket = S}) ->
 
 send(Type, Binary) ->
 	ws_server:send({Type, Binary}).
+
+-endif.
