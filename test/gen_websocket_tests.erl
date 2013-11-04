@@ -107,7 +107,7 @@ connectivity_test_() ->
 
 
 communication_test_() ->
-	{setup, local, fun() ->
+	{timeout, 10000, {setup, local, fun() ->
 		{ok, Cowboy} = ws_server:start_link(<<"/ws">>, 9077),
 		{ok, WS} = gen_websocket:connect("ws://localhost:9077/ws", []),
 		[Handler] = ws_server:handlers(),
@@ -145,7 +145,7 @@ communication_test_() ->
 			?assertEqual(ok, Got)
 		end},
 
-		{"passive mode tests", setup, local, fun() ->
+		{"passive mode tests", timeout, 10000, {setup, local, fun() ->
 			?debugFmt("My pid: ~p", [self()]),
 			gen_websocket:setopts(WS, [{active, false}])
 		end, fun(_) ->
@@ -202,9 +202,14 @@ communication_test_() ->
 				?assertEqual(timeout, Got),
 				AlsoGot = gen_websocket:recv(WS),
 				?assertEqual({ok, {text, Msg}}, AlsoGot)
+			end},
+
+			{"timeout longer than gen_fsm default of 5 seconds", timeout, 10000, fun() ->
+				Got = gen_websocket:recv(WS, 6000),
+				?assertEqual({error, timeout}, Got)
 			end}
 
-		] end},
+		] end}},
 
 		{"active once mode tests", setup, local, fun() ->
 			gen_websocket:setopts(WS, [{active, once}])
@@ -337,7 +342,7 @@ communication_test_() ->
 
 		] end}
 
-	] end}.
+	] end}}.
 
 options_test_() ->
 	{setup, local, fun() ->

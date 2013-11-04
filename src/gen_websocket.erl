@@ -140,7 +140,7 @@ send(Socket, Msg) ->
 %% @doc Send a message as the given type.
 -spec send(Socket :: websocket(), Msg :: binary(), Type :: message_type()) -> 'ok'.
 send(Socket, Msg, Type) ->
-	gen_fsm:sync_send_all_state_event(Socket, {send, Type, Msg}).
+	gen_fsm:sync_send_all_state_event(Socket, {send, Type, Msg}, infinity).
 
 %% @doc recv/2 with an infinte timeout. @see recv/2
 -spec recv(Socket :: websocket()) -> {'ok', frame()}.
@@ -150,19 +150,19 @@ recv(Socket) ->
 %% @doc Get a single frame from the socket, giving up after the timeout.
 -spec recv(Socket :: websocket(), Timeout :: timeout()) -> {'ok', frame()} | {'error', 'timeout'}.
 recv(Socket, Timeout) ->
-	gen_fsm:sync_send_event(Socket, {recv, Timeout}).
+	gen_fsm:sync_send_event(Socket, {recv, Timeout}, infinity).
 
 %% @doc set the controlling process to a new owner. Can only succede if
 %% called from the current owner.
 -spec controlling_process(Socket :: websocket(), NewOwner :: pid()) -> 'ok' | {'error', 'not_owner'}.
 controlling_process(Socket, NewOwner) ->
-	gen_fsm:sync_send_all_state_event(Socket, {controlling_process, NewOwner}).
+	gen_fsm:sync_send_all_state_event(Socket, {controlling_process, NewOwner}, infinity).
 
 %% @doc Close the socket without exiting the process created on socket
 %% connect.
 -spec close(Socket :: websocket()) -> 'ok' | {'error', term()}.
 close(Socket) ->
-	gen_fsm:sync_send_event(Socket, close).
+	gen_fsm:sync_send_event(Socket, close, infinity).
 
 %% @doc Close the socket and shut it down with the given reason.
 -spec shutdown(Socket :: websocket(), How :: term()) -> 'ok'.
@@ -172,7 +172,7 @@ shutdown(Socket, How) ->
 %% @doc Set the given options on the given socket.
 -spec setopts(Socket :: websocket(), Opts :: connect_opts()) -> 'ok'.
 setopts(Socket, Opts) ->
-	gen_fsm:sync_send_all_state_event(Socket, {setopts, Opts}).
+	gen_fsm:sync_send_all_state_event(Socket, {setopts, Opts}, infinity).
 
 %% @doc Like ping/2 with an infinite timeout.
 -spec ping(Socket :: websocket()) -> 'pong' | 'pang' | {'error', 'closed'}.
@@ -183,7 +183,7 @@ ping(Socket) ->
 %% until either the timeout is reached or a reply is given.
 -spec ping(Socket :: websocket(), Timeout :: timeout()) -> 'pong' | 'pang' | {'error', 'closed'}.
 ping(Socket, Timeout) ->
-	gen_fsm:sync_send_all_state_event(Socket, {ping, Timeout}).
+	gen_fsm:sync_send_all_state_event(Socket, {ping, Timeout}, infinity).
 
 %% gen_fsm api
 %% @private
