@@ -105,6 +105,28 @@ connectivity_test_() ->
 
 	] end}.
 
+large_message_test_() ->
+	{setup, local, fun() ->
+		{ok, Cowboy} = ws_server:start_link(<<"/ws">>, 9079),
+		{ok, WS} = gen_websocket:connect("ws://localhost:9079/ws", []),
+		[Handler] = ws_server:handlers(),
+		{Cowboy, WS, Handler}
+	end,
+	fun({Cowboy, WS, Hander}) ->
+		gen_websocket:close(WS),
+		unlink(Cowboy),
+		ws_server:stop()
+	end,
+	fun({Cowboy, WS, Hander}) ->
+
+		{"handles a large message that gets split up", fun() ->
+			Msg = iolist_to_binary(string:copies([<<"A bunch of data to do things with and make life happy.\n">>], 1024)),
+			ws_server:send(Msg),
+			Got = gen_websocket:recv(WS),
+			?assertEqual({ok, {text, Msg}}, Got)
+		end}
+
+	end}.
 
 communication_test_() ->
 	{timeout, 10000, {setup, local, fun() ->

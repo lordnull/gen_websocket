@@ -804,17 +804,17 @@ setopts_state_transition(Opts, Statename, State) ->
 decode_frames(Binary, State) ->
 	decode_frames(Binary, State, []).
 
-decode_frames(<<Fin:1, 0:3, Opcode:4, 0:1, Len:7, Rest/bits>>, State, Acc) when Len < 126 ->
+decode_frames(<<Fin:1, 0:3, Opcode:4, 0:1, Len:7, Rest/bits>>, State, Acc) when Len < 126, byte_size(Rest) >= Len ->
 	<<Payload:Len/binary, Rest2/bits>> = Rest,
 	Frame = #raw_frame{fin = Fin, opcode = Opcode, payload = Payload},
 	Acc2 = [Frame | Acc],
 	decode_frames(Rest2, State, Acc2);
-decode_frames(<<Fin:1, 0:3, Opcode:4, 0:1, 126:7, Len:16, Rest/bits>>, State, Acc) when Len > 125, Opcode < 8 ->
+decode_frames(<<Fin:1, 0:3, Opcode:4, 0:1, 126:7, Len:16, Rest/bits>>, State, Acc) when Len > 125, Opcode < 8, byte_size(Rest) >= Len ->
 	<<Payload:Len/binary, Rest2/bits>> = Rest,
 	Frame = #raw_frame{fin = Fin, opcode = Opcode, payload = Payload},
 	Acc2 = [Frame | Acc],
 	decode_frames(Rest2, State, Acc2);
-decode_frames(<<Fin:1, 0:3, Opcode:4, 0:1, 127:7, Len:63, Rest/bits>>, State, Acc) when Len > 16#ffff, Opcode < 8 ->
+decode_frames(<<Fin:1, 0:3, Opcode:4, 0:1, 127:7, Len:63, Rest/bits>>, State, Acc) when Len > 16#ffff, Opcode < 8, byte_size(Rest) >= Len ->
 	<<Payload:Len/binary, Rest2/bits>> = Rest,
 	Frame = #raw_frame{fin = Fin, opcode = Opcode, payload = Payload},
 	Acc2 = [Frame | Acc],
